@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services import users as user_svc
@@ -147,15 +147,193 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("📅 Weekly view coming in a few days. Use /today for now.")
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    currency = db_user["currency"]
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    remit_rate = await vehicle_svc.get_remittance_rate(vehicle["id"]) if vehicle else 0.0
+
+    today = date.today()
+    week_start = today - timedelta(days=6)
+
+    async with get_db() as db:
+        trip_rows = await db.fetch(
+            """SELECT DATE(occurred_at) AS day, COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
+               FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2 AND paid = 1
+               GROUP BY DATE(occurred_at)""",
+            db_user["id"], week_start,
+        )
+        expense_rows = await db.fetch(
+            """SELECT DATE(occurred_at) AS day, COALESCE(SUM(amount), 0) AS costs
+               FROM expenses WHERE user_id = $1 AND DATE(occurred_at) >= $2
+               GROUP BY DATE(occurred_at)""",
+            db_user["id"], week_start,
+        )
+        remit_rows = await db.fetch(
+            "SELECT paid_on AS day, status FROM remittance_log WHERE vehicle_id = $1 AND paid_on >= $2",
+            vehicle["id"] if vehicle else 0, week_start,
+        ) if vehicle else []
+
+    trips_by_day = {r["day"]: (r["gross"], r["cnt"]) for r in trip_rows}
+    costs_by_day = {r["day"]: r["costs"] for r in expense_rows}
+    remit_by_day = {r["day"]: r["status"] for r in remit_rows}
+
+    days = []
+    for i in range(7):
+        d = week_start + timedelta(days=i)
+        gross, cnt = trips_by_day.get(d, (0.0, 0))
+        costs = costs_by_day.get(d, 0.0)
+        remit = 0.0 if remit_by_day.get(d) == "REST" else remit_rate
+        profit = gross - costs - remit
+        days.append({"date": d, "gross": gross, "profit": profit, "cnt": cnt})
+
+    profits = [d["profit"] for d in days]
+    best = max(days, key=lambda d: d["profit"])
+    worst = min(days, key=lambda d: d["profit"])
+    bar_max = max((abs(p) for p in profits), default=1) or 1
+
+    week_gross = sum(d["gross"] for d in days)
+    week_profit = sum(d["profit"] for d in days)
+
+    lines = ["📅 *Last 7 days*\n"]
+    for d in days:
+        profit = d["profit"]
+        bar_len = min(8, round(abs(profit) / bar_max * 8))
+        bar = ("█" if profit >= 0 else "▒") * bar_len + "░" * (8 - bar_len)
+        star = " ⭐" if d["date"] == best["date"] and profit > 0 else ""
+        sign = "+" if profit >= 0 else ""
+        day_label = d["date"].strftime("%a") + " " + str(d["date"].day)
+        lines.append(f"`{day_label:<7}` {bar}  {sign}{format_currency(currency, profit)}{star}")
+
+    lines.append("\n──────────────────")
+    lines.append(f"Earnings: *{format_currency(currency, week_gross)}*")
+    sign = "+" if week_profit >= 0 else ""
+    lines.append(f"Profit:   *{sign}{format_currency(currency, week_profit)}*")
+    if best["profit"] != worst["profit"]:
+        lines.append(f"\n⭐ Best: {best['date'].strftime('%a')} {format_currency(currency, best['profit'])}")
+        lines.append(f"📉 Worst: {worst['date'].strftime('%a')} {format_currency(currency, worst['profit'])}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("📆 Monthly view coming soon. Use /today for now.")
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    currency = db_user["currency"]
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    now = datetime.now()
+    month_start = date(now.year, now.month, 1)
+    month_name = now.strftime("%B %Y")
+
+    async with get_db() as db:
+        tr = await db.fetchrow(
+            """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS trips,
+                      COUNT(DISTINCT DATE(occurred_at)) AS days
+               FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2 AND paid = 1""",
+            db_user["id"], month_start,
+        )
+        ex_rows = await db.fetch(
+            """SELECT type, COALESCE(SUM(amount), 0) AS total
+               FROM expenses WHERE user_id = $1 AND DATE(occurred_at) >= $2
+               GROUP BY type ORDER BY total DESC""",
+            db_user["id"], month_start,
+        )
+        remit = await db.fetchrow(
+            """SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS days_paid
+               FROM remittance_log WHERE vehicle_id = $1 AND paid_on >= $2 AND status = 'PAID'""",
+            vehicle["id"] if vehicle else 0, month_start,
+        ) if vehicle else None
+
+    gross = tr["gross"]
+    trip_count = tr["trips"]
+    days_worked = tr["days"]
+    total_expenses = sum(r["total"] for r in ex_rows)
+    remit_total = remit["total"] if remit else 0.0
+    remit_days = remit["days_paid"] if remit else 0
+    net = gross - total_expenses - remit_total
+
+    type_labels = {
+        "FUEL": "Fuel", "REPAIR": "Repairs", "WASHING": "Washing",
+        "ACCESSORY": "Accessories", "FINE": "Fines",
+        "INSURANCE": "Insurance", "TYRE": "Tyres", "OTHER": "Other",
+    }
+
+    lines = [f"📆 *{month_name}*\n"]
+    lines.append(f"Earnings: *{format_currency(currency, gross)}*  ({trip_count} trips, {days_worked} days)")
+    lines.append("──────────────────")
+
+    for r in ex_rows:
+        label = type_labels.get(r["type"], r["type"].title())
+        lines.append(f"{label}: *−{format_currency(currency, r['total'])}*")
+
+    if remit_total > 0:
+        lines.append(f"Remittance: *−{format_currency(currency, remit_total)}*  ({remit_days} days paid)")
+
+    lines.append("──────────────────")
+    sign = "+" if net >= 0 else ""
+    lines.append(f"Net profit: *{sign}{format_currency(currency, net)}*")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_clients(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("👥 Client stats coming soon.")
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    currency = db_user["currency"]
+
+    async with get_db() as db:
+        rows = await db.fetch(
+            """SELECT display_name, lifetime_revenue, trip_count
+               FROM passengers WHERE user_id = $1 AND trip_count > 0
+               ORDER BY lifetime_revenue DESC LIMIT 10""",
+            db_user["id"],
+        )
+        unpaid_rows = await db.fetch(
+            """SELECT p.display_name, COUNT(*) AS cnt, SUM(t.amount) AS total
+               FROM trips t JOIN passengers p ON p.id = t.passenger_id
+               WHERE t.user_id = $1 AND t.paid = 0
+               GROUP BY p.display_name""",
+            db_user["id"],
+        )
+
+    if not rows:
+        await update.message.reply_text(
+            "No named clients yet.\nAdd a name to a trip: `450 kyrenia mrs adama`",
+            parse_mode="Markdown",
+        )
+        return
+
+    unpaid_map = {r["display_name"].lower(): r for r in unpaid_rows}
+    total_revenue = sum(r["lifetime_revenue"] for r in rows) or 1
+
+    lines = ["👥 *Top clients*\n"]
+    for i, r in enumerate(rows, 1):
+        name = r["display_name"]
+        revenue = r["lifetime_revenue"]
+        trips = r["trip_count"]
+        pct = round(revenue / total_revenue * 100)
+        avg = revenue / trips if trips else 0
+
+        lines.append(
+            f"*{i}. {name}* — {format_currency(currency, revenue)}  ({trips} trips · {pct}% · avg {format_currency(currency, avg)})"
+        )
+        unpaid = unpaid_map.get(name.lower())
+        if unpaid:
+            lines.append(f"   ⚠️ owes {format_currency(currency, unpaid['total'])} ({unpaid['cnt']} unpaid)")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_owed(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -241,7 +419,45 @@ async def cmd_rest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⛽ Fuel trends coming soon (Day 7).")
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    currency = db_user["currency"]
+
+    async with get_db() as db:
+        rows = await db.fetch(
+            """SELECT DATE_TRUNC('month', occurred_at) AS month,
+                      SUM(amount) AS total, SUM(litres) AS total_litres, COUNT(*) AS fills
+               FROM expenses WHERE user_id = $1 AND type = 'FUEL'
+               GROUP BY DATE_TRUNC('month', occurred_at)
+               ORDER BY month DESC LIMIT 6""",
+            db_user["id"],
+        )
+
+    if not rows:
+        await update.message.reply_text(
+            "No fuel entries yet.\nLog fuel: `fuel 2000` or `fuel 2000 32l` to track cost per litre.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = ["⛽ *Fuel — last 6 months*\n"]
+    for r in rows:
+        month_str = r["month"].strftime("%b %Y")
+        total = r["total"]
+        fills = r["fills"]
+        litres = r["total_litres"]
+
+        line = f"*{month_str}* — {format_currency(currency, total)}  ({fills} fills)"
+        if litres:
+            cpl = total / litres
+            line += f"\n  {litres:.0f} L · {format_currency(currency, cpl)}/L"
+        lines.append(line)
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
