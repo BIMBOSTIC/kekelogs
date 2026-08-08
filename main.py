@@ -11,7 +11,7 @@ from handlers.message import handle_text
 from handlers.callbacks import handle_confirm, handle_cancel, handle_delete_confirm
 from handlers.commands import (
     cmd_undo, cmd_day, cmd_today, cmd_week, cmd_month,
-    cmd_clients, cmd_owed, cmd_car, cmd_fuel, cmd_help,
+    cmd_clients, cmd_owed, cmd_car, cmd_rest, cmd_fuel, cmd_help,
     cmd_privacy, cmd_deleteme,
 )
 
@@ -40,6 +40,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clients", cmd_clients))
     app.add_handler(CommandHandler("owed", cmd_owed))
     app.add_handler(CommandHandler("car", cmd_car))
+    app.add_handler(CommandHandler("rest", cmd_rest))
     app.add_handler(CommandHandler("fuel", cmd_fuel))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("privacy", cmd_privacy))

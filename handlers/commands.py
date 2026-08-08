@@ -4,6 +4,7 @@ from telegram.ext import ContextTypes
 from services import users as user_svc
 from services import vehicles as vehicle_svc
 from services.trips import undo_last_action, save_trip
+from services.remittance import get_today_status, get_owing_balance, mark_rest_day
 from db.database import get_db
 from utils.formatting import format_currency
 
@@ -36,9 +37,12 @@ async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             f"↩️ Removed {s.get('expense_type', 'expense').title()}: {format_currency(currency, s['amount'])}"
         )
     elif atype == "remittance":
-        await update.message.reply_text(
-            f"↩️ Removed remittance: {format_currency(currency, s['amount'])}"
-        )
+        if s.get("status") == "REST":
+            await update.message.reply_text("↩️ Rest day removed.")
+        else:
+            await update.message.reply_text(
+                f"↩️ Removed remittance: {format_currency(currency, s['amount'])}"
+            )
     else:
         await update.message.reply_text("↩️ Last entry removed.")
 
@@ -90,7 +94,10 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     today = date.today()
     currency = db_user["currency"]
     vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
-    remit_rate = await vehicle_svc.get_remittance_rate(vehicle["id"]) if vehicle else 0.0
+
+    remit_info = await get_today_status(vehicle["id"]) if vehicle else {"status": "na", "amount": 0.0}
+    remit_due = remit_info["amount"] if remit_info["status"] not in ("na", "rest") else 0.0
+    owing_balance = await get_owing_balance(vehicle["id"]) if vehicle else 0.0
 
     async with get_db() as db:
         tr = await db.fetchrow(
@@ -105,20 +112,26 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     gross = tr["gross"]
     trip_count = tr["cnt"]
     costs = ex["total"]
-    profit = gross - costs - remit_rate
+    profit = gross - costs - remit_due
 
     day_str = datetime.now().strftime("%A %d %b").replace(" 0", " ")
     lines = [f"📊 *Today — {day_str}*\n"]
     lines.append(f"Trips: *{format_currency(currency, gross)}* ({trip_count})")
     if costs > 0:
         lines.append(f"Costs: *−{format_currency(currency, costs)}*")
-    if remit_rate > 0:
-        lines.append(f"Remittance: *−{format_currency(currency, remit_rate)}*")
+
+    if remit_info["status"] == "paid":
+        lines.append(f"Remittance: ✅ *{format_currency(currency, remit_info['amount'])}* paid")
+    elif remit_info["status"] == "rest":
+        lines.append("Remittance: 🏖️ rest day")
+    elif remit_due > 0:
+        lines.append(f"Remittance: ⚠️ *{format_currency(currency, remit_due)}* not paid yet")
+
     lines.append("──────────────────")
     sign = "+" if profit >= 0 else ""
     lines.append(f"Net profit: *{sign}{format_currency(currency, profit)}*")
 
-    breakeven = costs + remit_rate
+    breakeven = costs + remit_due
     if breakeven > 0:
         if gross < breakeven:
             still_need = breakeven - gross
@@ -126,6 +139,9 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             lines.append(f"You need *{format_currency(currency, still_need)}* more ↑")
         else:
             lines.append(f"\n✅ Break-even beaten by *{format_currency(currency, profit)}*")
+
+    if owing_balance > 0:
+        lines.append(f"\n📛 Previous days owing: *{format_currency(currency, owing_balance)}*")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -200,6 +216,30 @@ async def cmd_car(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def cmd_rest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    if not vehicle:
+        await update.message.reply_text("No vehicle found. Run /start to set up.")
+        return
+
+    success = await mark_rest_day(vehicle["id"], db_user["id"])
+    if success:
+        await update.message.reply_text(
+            "🏖️ *Rest day logged.*\nNo remittance due today.\nUse /undo to remove if logged by mistake.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            "Today already has a remittance entry. Use /undo first if you need to change it."
+        )
+
+
 async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("⛽ Fuel trends coming soon (Day 7).")
 
@@ -225,6 +265,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`/day 3600` — log full day earnings\n"
         f"`/undo` — remove last entry\n"
         f"`/today` — today's profit & break-even\n"
+        f"`/rest` — mark today as a rest day (no remittance)\n"
         f"`/week` — weekly summary\n"
         f"`/owed` — unpaid trips by client\n"
         f"`/car` — vehicle & remittance settings\n"
