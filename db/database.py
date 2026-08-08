@@ -13,6 +13,12 @@ async def init_db() -> None:
     _pool = await asyncpg.create_pool(DATABASE_URL, ssl=ssl)
     async with _pool.acquire() as conn:
         await conn.execute(_SCHEMA.read_text(encoding="utf-8"))
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS morning_push INTEGER NOT NULL DEFAULT 0"
+        )
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS morning_push_time TEXT NOT NULL DEFAULT '07:00'"
+        )
 
 
 @asynccontextmanager

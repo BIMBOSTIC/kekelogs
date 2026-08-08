@@ -394,6 +394,76 @@ async def cmd_car(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def cmd_morning(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    args = ctx.args
+    if not args:
+        status = "on ✅" if db_user.get("morning_push") else "off"
+        push_time = db_user.get("morning_push_time", "07:00")
+        await update.message.reply_text(
+            f"Morning push is *{status}*\n"
+            f"Time: *{push_time}* ({db_user['timezone']})\n\n"
+            f"Turn on: `/morning on` or `/morning on 06:30`\n"
+            f"Turn off: `/morning off`",
+            parse_mode="Markdown",
+        )
+        return
+
+    action = args[0].lower()
+
+    if action == "off":
+        await user_svc.update_user(uid, morning_push=0)
+        for job in ctx.job_queue.get_jobs_by_name(f"morning_{uid}"):
+            job.schedule_removal()
+        await update.message.reply_text("Morning push turned off.")
+        return
+
+    if action == "on":
+        time_str = args[1] if len(args) > 1 else "07:00"
+        try:
+            parts = time_str.split(":")
+            h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            if not (0 <= h <= 23 and 0 <= m <= 59):
+                raise ValueError
+            time_str = f"{h:02d}:{m:02d}"
+        except (ValueError, IndexError):
+            await update.message.reply_text(
+                "Invalid time. Use format: `/morning on 07:00`", parse_mode="Markdown"
+            )
+            return
+
+        await user_svc.update_user(uid, morning_push=1, morning_push_time=time_str)
+
+        vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+        if vehicle:
+            from services.morning import schedule_push
+            schedule_push(
+                ctx.application,
+                telegram_id=uid,
+                user_db_id=db_user["id"],
+                vehicle_id=vehicle["id"],
+                currency=db_user["currency"],
+                timezone=db_user["timezone"],
+                push_time_str=time_str,
+            )
+
+        await update.message.reply_text(
+            f"✅ Morning push set for *{time_str}* ({db_user['timezone']})\n"
+            "I'll send your break-even every morning before your shift.",
+            parse_mode="Markdown",
+        )
+        return
+
+    await update.message.reply_text(
+        "Usage: `/morning on [HH:MM]` or `/morning off`", parse_mode="Markdown"
+    )
+
+
 async def cmd_rest(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     db_user = await user_svc.get_user(uid)
@@ -482,6 +552,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`/undo` — remove last entry\n"
         f"`/today` — today's profit & break-even\n"
         f"`/rest` — mark today as a rest day (no remittance)\n"
+        f"`/morning on 07:00` — daily break-even push before your shift\n"
         f"`/week` — weekly summary\n"
         f"`/owed` — unpaid trips by client\n"
         f"`/car` — vehicle & remittance settings\n"

@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS users (
     timezone TEXT NOT NULL DEFAULT 'Europe/Istanbul',
     tier TEXT NOT NULL DEFAULT 'free',
     onboarded INTEGER NOT NULL DEFAULT 0,
+    morning_push INTEGER NOT NULL DEFAULT 0,
+    morning_push_time TEXT NOT NULL DEFAULT '07:00',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

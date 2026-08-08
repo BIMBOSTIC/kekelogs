@@ -11,9 +11,10 @@ from handlers.message import handle_text
 from handlers.callbacks import handle_confirm, handle_cancel, handle_delete_confirm
 from handlers.commands import (
     cmd_undo, cmd_day, cmd_today, cmd_week, cmd_month,
-    cmd_clients, cmd_owed, cmd_car, cmd_rest, cmd_fuel, cmd_help,
-    cmd_privacy, cmd_deleteme,
+    cmd_clients, cmd_owed, cmd_car, cmd_rest, cmd_morning,
+    cmd_fuel, cmd_help, cmd_privacy, cmd_deleteme,
 )
+from services.morning import schedule_all_morning_pushes
 
 logging.basicConfig(
     format="%(asctime)s — %(name)s — %(levelname)s — %(message)s",
@@ -25,6 +26,8 @@ logger = logging.getLogger(__name__)
 async def _post_init(app: Application) -> None:
     await init_db()
     logger.info("Database ready")
+    await schedule_all_morning_pushes(app)
+    logger.info("Morning pushes scheduled")
 
 
 def main() -> None:
@@ -41,6 +44,7 @@ def main() -> None:
     app.add_handler(CommandHandler("owed", cmd_owed))
     app.add_handler(CommandHandler("car", cmd_car))
     app.add_handler(CommandHandler("rest", cmd_rest))
+    app.add_handler(CommandHandler("morning", cmd_morning))
     app.add_handler(CommandHandler("fuel", cmd_fuel))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("privacy", cmd_privacy))
