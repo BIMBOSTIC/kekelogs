@@ -96,6 +96,38 @@ async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> None:
         )
 
 
+async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    passenger_id = int(q.data.split(":", 1)[1])
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    currency = db_user["currency"]
+
+    async with get_db() as db:
+        summary = await db.fetchrow(
+            "SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total FROM trips WHERE passenger_id = $1 AND paid = 0",
+            passenger_id,
+        )
+        await db.execute(
+            "UPDATE trips SET paid = 1 WHERE passenger_id = $1 AND paid = 0", passenger_id
+        )
+        await db.execute(
+            """UPDATE passengers
+               SET lifetime_revenue = lifetime_revenue + $1, trip_count = trip_count + $2
+               WHERE id = $3""",
+            summary["total"], summary["cnt"], passenger_id,
+        )
+        p = await db.fetchrow("SELECT display_name FROM passengers WHERE id = $1", passenger_id)
+
+    name = p["display_name"] if p else "Client"
+    amt = format_currency(currency, summary["total"])
+    await q.edit_message_text(
+        f"✅ *{name}* marked as paid — {amt} settled.",
+        parse_mode="Markdown",
+    )
+
+
 async def handle_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -110,6 +142,18 @@ async def handle_delete_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
 
     if action == "cancel":
         await q.edit_message_text("Cancelled. Your account is safe.")
+        return
+
+    if action == "passengers":
+        uid = update.effective_user.id
+        db_user = await user_svc.get_user(uid)
+        if db_user:
+            async with get_db() as db:
+                await db.execute("UPDATE trips SET passenger_id = NULL WHERE user_id = $1", db_user["id"])
+                await db.execute("DELETE FROM passengers WHERE user_id = $1", db_user["id"])
+        await q.edit_message_text(
+            "✅ All passenger names deleted.\nYour trips, earnings, and settings are unchanged."
+        )
         return
 
     uid = update.effective_user.id

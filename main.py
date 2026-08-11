@@ -8,10 +8,10 @@ from config import TELEGRAM_TOKEN, LOG_LEVEL
 from db.database import init_db
 from handlers.start import build_start_handler
 from handlers.message import handle_text
-from handlers.callbacks import handle_confirm, handle_cancel, handle_delete_confirm
+from handlers.callbacks import handle_confirm, handle_cancel, handle_delete_confirm, handle_mark_paid
 from handlers.commands import (
     cmd_undo, cmd_day, cmd_today, cmd_week, cmd_month,
-    cmd_clients, cmd_owed, cmd_car, cmd_rest, cmd_morning,
+    cmd_clients, cmd_owed, cmd_setremit, cmd_car, cmd_rest, cmd_morning,
     cmd_fuel, cmd_help, cmd_privacy, cmd_deleteme,
 )
 from services.morning import schedule_all_morning_pushes
@@ -43,6 +43,7 @@ def main() -> None:
     app.add_handler(CommandHandler("clients", cmd_clients))
     app.add_handler(CommandHandler("owed", cmd_owed))
     app.add_handler(CommandHandler("car", cmd_car))
+    app.add_handler(CommandHandler("setremit", cmd_setremit))
     app.add_handler(CommandHandler("rest", cmd_rest))
     app.add_handler(CommandHandler("morning", cmd_morning))
     app.add_handler(CommandHandler("fuel", cmd_fuel))
@@ -52,6 +53,7 @@ def main() -> None:
 
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^ct:"))
     app.add_handler(CallbackQueryHandler(handle_cancel, pattern="^cn:"))
+    app.add_handler(CallbackQueryHandler(handle_mark_paid, pattern="^paid:"))
     app.add_handler(CallbackQueryHandler(handle_delete_confirm, pattern="^delete:"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

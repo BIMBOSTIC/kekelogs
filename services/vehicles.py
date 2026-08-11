@@ -37,3 +37,15 @@ async def create_remittance_rule(vehicle_id: int, amount: float, frequency: str 
             "INSERT INTO remittance_rules (vehicle_id, amount, frequency, effective_from) VALUES ($1, $2, $3, $4)",
             vehicle_id, amount, frequency, date.today(),
         )
+
+
+async def update_remittance_rate(vehicle_id: int, new_amount: float) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE remittance_rules SET effective_to = $1 WHERE vehicle_id = $2 AND effective_to IS NULL",
+            date.today(), vehicle_id,
+        )
+        await db.execute(
+            "INSERT INTO remittance_rules (vehicle_id, amount, frequency, effective_from) VALUES ($1, $2, 'DAILY', $3)",
+            vehicle_id, new_amount, date.today(),
+        )

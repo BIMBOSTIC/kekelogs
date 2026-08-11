@@ -345,27 +345,42 @@ async def cmd_owed(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     currency = db_user["currency"]
     async with get_db() as db:
-        rows = await db.fetch(
-            """SELECT t.amount, t.destination, t.occurred_at, p.display_name
-               FROM trips t LEFT JOIN passengers p ON p.id = t.passenger_id
+        named = await db.fetch(
+            """SELECT p.id, p.display_name, COUNT(*) AS cnt, SUM(t.amount) AS total
+               FROM trips t JOIN passengers p ON p.id = t.passenger_id
                WHERE t.user_id = $1 AND t.paid = 0
-               ORDER BY t.occurred_at DESC LIMIT 20""",
+               GROUP BY p.id, p.display_name
+               ORDER BY total DESC""",
+            db_user["id"],
+        )
+        unnamed = await db.fetchrow(
+            """SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total
+               FROM trips WHERE user_id = $1 AND paid = 0 AND passenger_id IS NULL""",
             db_user["id"],
         )
 
-    if not rows:
-        await update.message.reply_text("No unpaid trips. All clear!")
+    total_owed = sum(r["total"] for r in named) + unnamed["total"]
+    if total_owed == 0:
+        await update.message.reply_text("No unpaid trips. All clear! ✅")
         return
 
-    total = sum(r["amount"] for r in rows)
-    lines = [f"💸 *Unpaid trips — {format_currency(currency, total)} total*\n"]
-    for r in rows:
-        name = r["display_name"] or "—"
-        dest = r["destination"] or "—"
-        dt = r["occurred_at"].strftime("%Y-%m-%d") if r["occurred_at"] else "—"
-        lines.append(f"• {format_currency(currency, r['amount'])} · {dest} · {name} · {dt}")
+    lines = [f"💸 *Unpaid — {format_currency(currency, total_owed)} total*\n"]
+    keyboard = []
+    for r in named:
+        lines.append(f"*{r['display_name']}* · {r['cnt']} trip(s) · {format_currency(currency, r['total'])}")
+        keyboard.append([InlineKeyboardButton(
+            f"✓ {r['display_name']} paid",
+            callback_data=f"paid:{r['id']}",
+        )])
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    if unnamed["cnt"] > 0:
+        lines.append(f"Unnamed · {unnamed['cnt']} trip(s) · {format_currency(currency, unnamed['total'])}")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
+        parse_mode="Markdown",
+    )
 
 
 async def cmd_car(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -392,6 +407,45 @@ async def cmd_car(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     lines.append(f"\nCurrency: {currency} · Timezone: {db_user['timezone']}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_setremit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    currency = db_user["currency"]
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    if not vehicle:
+        await update.message.reply_text("No vehicle found. Run /start to set up.")
+        return
+
+    args = ctx.args
+    if not args:
+        current = await vehicle_svc.get_remittance_rate(vehicle["id"])
+        await update.message.reply_text(
+            f"Current remittance: *{format_currency(currency, current)}/day*\n\n"
+            "To update: `/setremit 1200`",
+            parse_mode="Markdown",
+        )
+        return
+
+    try:
+        amount = float(args[0].replace(",", ""))
+        if amount < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Enter a valid amount, e.g. `/setremit 1200`", parse_mode="Markdown")
+        return
+
+    await vehicle_svc.update_remittance_rate(vehicle["id"], amount)
+    await update.message.reply_text(
+        f"✅ Remittance updated to *{format_currency(currency, amount)}/day* from today.\n"
+        "Past days are unchanged — the old rate still applies to historical profit.",
+        parse_mode="Markdown",
+    )
 
 
 async def cmd_morning(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -555,6 +609,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`/morning on 07:00` — daily break-even push before your shift\n"
         f"`/week` — weekly summary\n"
         f"`/owed` — unpaid trips by client\n"
+        f"`/setremit 1200` — update daily remittance rate\n"
         f"`/car` — vehicle & remittance settings\n"
         f"`/privacy` — privacy info\n"
         f"`/deleteme` — delete your account\n",
@@ -577,11 +632,12 @@ async def cmd_privacy(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_deleteme(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "⚠️ *Delete your account?*\n\n"
-        "This permanently deletes all trips, expenses, passengers, and settings. Cannot be undone.",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("Yes, delete everything", callback_data="delete:confirm"),
-            InlineKeyboardButton("Cancel", callback_data="delete:cancel"),
-        ]]),
+        "⚠️ *What would you like to delete?*\n\n"
+        "Passenger names are personal data of third parties — you can remove them without losing your earnings history.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑 Passenger names only", callback_data="delete:passengers")],
+            [InlineKeyboardButton("💥 Delete everything", callback_data="delete:confirm")],
+            [InlineKeyboardButton("Cancel", callback_data="delete:cancel")],
+        ]),
         parse_mode="Markdown",
     )
