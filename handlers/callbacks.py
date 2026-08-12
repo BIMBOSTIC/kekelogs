@@ -62,7 +62,13 @@ async def handle_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         )
 
     elif entry_type == "remittance":
-        await _save_remittance(db_user["id"], vehicle["id"], data)
+        saved = await _save_remittance(db_user["id"], vehicle["id"], data)
+        if not saved:
+            await q.edit_message_text(
+                "⚠️ Remittance already logged today.\nUse `undo` first if you need to change it.",
+                parse_mode="Markdown",
+            )
+            return
         amt = format_currency(currency, data["amount"])
         await q.edit_message_text(f"✅ Remittance logged — *{amt}*", parse_mode="Markdown")
 
@@ -90,7 +96,7 @@ async def _save_expense(user_id: int, vehicle_id: int, data: dict) -> None:
     await clear_redo_stack(user_id)
 
 
-async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> None:
+async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> bool:
     today = date.today()
     async with get_db() as db:
         row = await db.fetchrow(
@@ -101,7 +107,7 @@ async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> None:
             vehicle_id, data["amount"], today,
         )
         if not row:
-            return
+            return False
         snapshot = json.dumps({"amount": data["amount"], "paid_on": str(today)})
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
@@ -109,6 +115,7 @@ async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> None:
             user_id, row["id"], snapshot,
         )
     await clear_redo_stack(user_id)
+    return True
 
 
 async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -248,6 +255,9 @@ async def handle_edit_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
     db_user = await user_svc.get_user(uid)
     vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    if not vehicle:
+        await q.edit_message_text("No vehicle found. Run /start to set up.")
+        return
     currency = db_user["currency"]
     atype = pending["action_type"]
     parsed = pending["new_parsed"]

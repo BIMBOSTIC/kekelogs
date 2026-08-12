@@ -1,3 +1,4 @@
+import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes, ConversationHandler, CommandHandler,
@@ -87,7 +88,11 @@ async def _ownership_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def _plate_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    ctx.user_data["plate"] = update.message.text.strip()
+    plate = update.message.text.strip()[:64]
+    if not plate:
+        await update.message.reply_text("Please enter a plate or nickname.", parse_mode="Markdown")
+        return ASK_PLATE
+    ctx.user_data["plate"] = plate
     ownership = ctx.user_data.get("ownership")
 
     if ownership == "OWNED":
@@ -183,7 +188,17 @@ async def _timezone_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def _timezone_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if not ctx.user_data.get("awaiting_tz"):
         return ASK_TIMEZONE
-    ctx.user_data["timezone"] = update.message.text.strip()
+    raw_tz = update.message.text.strip()[:64]
+    try:
+        pytz.timezone(raw_tz)
+    except pytz.UnknownTimeZoneError:
+        await update.message.reply_text(
+            "Unknown timezone. Please try again, e.g. `Asia/Dubai` or `America/Toronto`.\n"
+            "Full list: en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+            parse_mode="Markdown",
+        )
+        return ASK_TIMEZONE
+    ctx.user_data["timezone"] = raw_tz
     ctx.user_data.pop("awaiting_tz", None)
     return await _finish(update, ctx, reply_fn=update.message.reply_text)
 
@@ -200,6 +215,7 @@ async def _finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE, edit_fn=None, 
         onboarded=1,
     )
 
+    remit = data.get("remittance", 0.0)
     existing_vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
     if not existing_vehicle:
         vehicle_id = await vehicle_svc.create_vehicle(
@@ -207,22 +223,22 @@ async def _finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE, edit_fn=None, 
             plate_or_nickname=data["plate"],
             ownership=data["ownership"],
         )
-        remit = data.get("remittance", 0.0)
         if remit > 0:
             await vehicle_svc.create_remittance_rule(vehicle_id, remit)
     else:
         vehicle_id = existing_vehicle["id"]
 
     currency = data["currency"]
+    plate = data.get("plate") or existing_vehicle["plate_or_nickname"]
     remit_line = f"Daily remittance: *{currency}{remit:,.0f}*\n" if remit > 0 else ""
 
     msg = (
         f"*All set!* 🚗\n\n"
-        f"Vehicle: *{data['plate']}*\n"
+        f"Vehicle: *{plate}*\n"
         f"{remit_line}"
         f"Currency: *{currency}*\n\n"
         f"*Quick guide:*\n"
-        f"`450` — trip for {currency}450\n"
+        f"`450` — log a trip for {currency}450\n"
         f"`450 kyrenia` — trip with destination\n"
         f"`450 kyrenia mrs adama` — trip + client name\n"
         f"`fuel 2000` — fuel expense\n"

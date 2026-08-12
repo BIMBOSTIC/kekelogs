@@ -1,9 +1,12 @@
+import logging
 import statistics
 import pytz
-from datetime import time
+from datetime import datetime, time
 from telegram.ext import Application
 from db.database import get_db
 from utils.formatting import format_currency
+
+_logger = logging.getLogger(__name__)
 
 
 async def compute_breakeven(user_id: int, vehicle_id: int) -> dict:
@@ -57,7 +60,14 @@ async def _send_morning_push(context) -> None:
 
 def _parse_push_time(time_str: str, tz) -> time:
     parts = time_str.split(":")
-    return time(int(parts[0]), int(parts[1]) if len(parts) > 1 else 0, tzinfo=tz)
+    h = int(parts[0])
+    m = int(parts[1]) if len(parts) > 1 else 0
+    # Localize correctly via pytz.localize(), then convert to UTC.
+    # Passing a pytz tz directly to time() gives wrong DST offsets.
+    today = datetime.now(pytz.utc).date()
+    local_dt = tz.localize(datetime(today.year, today.month, today.day, h, m))
+    utc_dt = local_dt.astimezone(pytz.utc)
+    return utc_dt.time().replace(tzinfo=pytz.utc)
 
 
 def schedule_push(
@@ -113,4 +123,4 @@ async def schedule_all_morning_pushes(app: Application) -> None:
                 push_time_str=r["morning_push_time"],
             )
         except Exception:
-            pass
+            _logger.exception("Failed to schedule morning push for user %s", r["telegram_id"])

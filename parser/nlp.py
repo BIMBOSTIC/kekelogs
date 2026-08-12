@@ -6,6 +6,21 @@ from config import ANTHROPIC_API_KEY
 
 _logger = logging.getLogger(__name__)
 
+_VALID_EXPENSE_TYPES = {"FUEL", "REPAIR", "ACCESSORY", "WASHING", "FINE", "INSURANCE", "TYRE", "OTHER"}
+
+
+def _valid_parsed(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    t = data.get("type")
+    if t not in ("trip", "expense", "remittance"):
+        return False
+    if not isinstance(data.get("amount"), (int, float)):
+        return False
+    if t == "expense" and data.get("expense_type") not in _VALID_EXPENSE_TYPES:
+        return False
+    return True
+
 _client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 _EXPENSE_LEAD = re.compile(
@@ -152,7 +167,11 @@ async def parse_message(text: str) -> dict | None:
         )
         if not resp.content or not hasattr(resp.content[0], "text"):
             return None
-        return json.loads(resp.content[0].text.strip())
+        result = json.loads(resp.content[0].text.strip())
+        if not _valid_parsed(result):
+            _logger.warning("Claude returned invalid schema: %r", result)
+            return None
+        return result
     except Exception:
         _logger.error("Claude parse failed for input %r", text[:80], exc_info=True)
         return None

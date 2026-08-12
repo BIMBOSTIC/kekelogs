@@ -51,6 +51,14 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Please set up your account first with /start")
         return
 
+    # Rate-limit parse_message calls (applies to both edit replies and free text)
+    now = time.monotonic()
+    bucket = [t for t in ctx.user_data.get("_rl_calls", []) if now - t < 60]
+    if len(bucket) >= _PARSE_RATE_LIMIT:
+        await update.message.reply_text("Too many requests — please wait a moment.")
+        return
+    ctx.user_data["_rl_calls"] = bucket + [now]
+
     # Editing state: user tapped an entry and must send corrected text
     if ctx.user_data.get("editing"):
         await _handle_edit_reply(update, ctx, db_user)
@@ -67,13 +75,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ctx.args = text.split()[1:]
         await _PREFIX_CMDS[words[0]](update, ctx)
         return
-
-    now = time.monotonic()
-    bucket = [t for t in ctx.user_data.get("_rl_calls", []) if now - t < 60]
-    if len(bucket) >= _PARSE_RATE_LIMIT:
-        await update.message.reply_text("Too many requests — please wait a moment.")
-        return
-    ctx.user_data["_rl_calls"] = bucket + [now]
 
     parsed = await parse_message(text)
 

@@ -4,23 +4,20 @@ from datetime import date, datetime
 from db.database import get_db
 
 _logger = logging.getLogger(__name__)
-_ALLOWED_TABLES = {"trips", "expenses", "remittance_log"}
+
+_DELETE_SQL = {
+    "trips":          "DELETE FROM trips WHERE id = $1",
+    "expenses":       "DELETE FROM expenses WHERE id = $1",
+    "remittance_log": "DELETE FROM remittance_log WHERE id = $1",
+}
 
 
 async def _get_or_create_passenger(db, user_id: int, display_name: str) -> int:
-    name_lower = display_name.strip().lower()
     row = await db.fetchrow(
-        "SELECT id FROM passengers WHERE user_id = $1 AND LOWER(display_name) = $2",
-        user_id, name_lower,
-    )
-
-    if row:
-        pid = row["id"]
-        await db.execute("UPDATE passengers SET last_seen = NOW() WHERE id = $1", pid)
-        return pid
-
-    row = await db.fetchrow(
-        "INSERT INTO passengers (user_id, display_name) VALUES ($1, $2) RETURNING id",
+        """INSERT INTO passengers (user_id, display_name)
+           VALUES ($1, $2)
+           ON CONFLICT (user_id, LOWER(display_name)) DO UPDATE SET last_seen = NOW()
+           RETURNING id""",
         user_id, display_name.strip(),
     )
     return row["id"]
@@ -102,12 +99,11 @@ async def undo_last_action(user_id: int) -> dict | None:
             user_id, log["action_type"], log["table_name"], log["snapshot"],
         )
 
-        if log["table_name"] not in _ALLOWED_TABLES:
+        sql = _DELETE_SQL.get(log["table_name"])
+        if sql is None:
             _logger.error("Illegal table_name %r in action_log id=%s", log["table_name"], log["id"])
             raise ValueError(f"Illegal table_name: {log['table_name']!r}")
-        await db.execute(
-            f"DELETE FROM {log['table_name']} WHERE id = $1", log["record_id"]
-        )
+        await db.execute(sql, log["record_id"])
 
         if log["action_type"] == "trip":
             pname = snapshot.get("passenger_name")
