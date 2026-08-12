@@ -1,5 +1,10 @@
 from db.database import get_db
 
+_ALLOWED_USER_COLUMNS = {
+    "currency", "timezone", "onboarded",
+    "morning_push", "morning_push_time", "log_cleared_at",
+}
+
 
 async def get_user(telegram_id: int) -> dict | None:
     async with get_db() as db:
@@ -20,6 +25,9 @@ async def create_user(telegram_id: int, username: str | None) -> None:
 async def update_user(telegram_id: int, **kwargs) -> None:
     if not kwargs:
         return
+    for k in kwargs:
+        if k not in _ALLOWED_USER_COLUMNS:
+            raise ValueError(f"Illegal column in update_user: {k!r}")
     keys = list(kwargs.keys())
     values = list(kwargs.values())
     fields = ", ".join(f"{k} = ${i + 1}" for i, k in enumerate(keys))

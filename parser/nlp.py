@@ -1,7 +1,10 @@
 import re
 import json
+import logging
 from anthropic import AsyncAnthropic
 from config import ANTHROPIC_API_KEY
+
+_logger = logging.getLogger(__name__)
 
 _client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -147,6 +150,9 @@ async def parse_message(text: str) -> dict | None:
             system=_CLAUDE_SYSTEM,
             messages=[{"role": "user", "content": text}],
         )
+        if not resp.content or not hasattr(resp.content[0], "text"):
+            return None
         return json.loads(resp.content[0].text.strip())
     except Exception:
+        _logger.error("Claude parse failed for input %r", text[:80], exc_info=True)
         return None

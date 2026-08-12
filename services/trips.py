@@ -1,6 +1,10 @@
 import json
+import logging
 from datetime import date, datetime
 from db.database import get_db
+
+_logger = logging.getLogger(__name__)
+_ALLOWED_TABLES = {"trips", "expenses", "remittance_log"}
 
 
 async def _get_or_create_passenger(db, user_id: int, display_name: str) -> int:
@@ -98,6 +102,9 @@ async def undo_last_action(user_id: int) -> dict | None:
             user_id, log["action_type"], log["table_name"], log["snapshot"],
         )
 
+        if log["table_name"] not in _ALLOWED_TABLES:
+            _logger.error("Illegal table_name %r in action_log id=%s", log["table_name"], log["id"])
+            raise ValueError(f"Illegal table_name: {log['table_name']!r}")
         await db.execute(
             f"DELETE FROM {log['table_name']} WHERE id = $1", log["record_id"]
         )
@@ -229,9 +236,9 @@ async def update_trip(
         await db.execute(
             """UPDATE trips
                SET amount=$1, destination=$2, passenger_id=$3, paid=$4, payment_method=$5
-               WHERE id=$6""",
+               WHERE id=$6 AND user_id=$7""",
             new_amount, parsed.get("destination"), passenger_id,
-            int(new_paid), parsed.get("payment_method", "CASH"), record_id,
+            int(new_paid), parsed.get("payment_method", "CASH"), record_id, user_id,
         )
 
         if passenger_id and new_paid:
@@ -261,10 +268,10 @@ async def update_expense(record_id: int, user_id: int, parsed: dict) -> None:
         await db.execute(
             """UPDATE expenses
                SET type=$1, amount=$2, note=$3, litres=$4, odometer=$5
-               WHERE id=$6""",
+               WHERE id=$6 AND user_id=$7""",
             parsed["expense_type"], parsed["amount"],
             parsed.get("note"), parsed.get("litres"), parsed.get("odometer"),
-            record_id,
+            record_id, user_id,
         )
         new_snapshot = json.dumps({
             "expense_type": parsed["expense_type"],
@@ -281,7 +288,10 @@ async def update_expense(record_id: int, user_id: int, parsed: dict) -> None:
 
 async def update_remittance_entry(record_id: int, vehicle_id: int, user_id: int, amount: float) -> None:
     async with get_db() as db:
-        await db.execute("UPDATE remittance_log SET amount=$1 WHERE id=$2", amount, record_id)
+        await db.execute(
+            "UPDATE remittance_log SET amount=$1 WHERE id=$2 AND vehicle_id=$3",
+            amount, record_id, vehicle_id,
+        )
         new_snapshot = json.dumps({"amount": amount})
         await db.execute(
             "UPDATE action_log SET snapshot=$1 WHERE user_id=$2 AND table_name='remittance_log' AND record_id=$3",

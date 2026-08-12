@@ -697,12 +697,16 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _send_report(message, db_user: dict, period: str) -> None:
+    if period not in _PERIOD_LABELS:
+        await message.reply_text("Invalid period. Choose: today, week, or month.")
+        return
+
     vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
     if not vehicle:
         await message.reply_text("No vehicle found. Run /start to set up.")
         return
 
-    label = _PERIOD_LABELS.get(period, period.title())
+    label = _PERIOD_LABELS[period]
     wait_msg = await message.reply_text(f"⏳ Building {label} report…")
 
     excel_bytes, filename = await build_report(

@@ -65,10 +65,16 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     return ASK_OWNERSHIP
 
 
+_VALID_OWNERSHIPS = {"OWNED", "RENTED", "HIRE_PURCHASE"}
+
+
 async def _ownership_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     q = update.callback_query
     await q.answer()
-    ownership = q.data.split(":")[1]
+    ownership = q.data.split(":", 1)[1]
+    if ownership not in _VALID_OWNERSHIPS:
+        await q.edit_message_text("Invalid selection. Please try again.", reply_markup=_OWNERSHIP_KB)
+        return ASK_OWNERSHIP
     ctx.user_data["ownership"] = ownership
 
     labels = {"OWNED": "own it", "RENTED": "rent it", "HIRE_PURCHASE": "have hire purchase"}
@@ -142,7 +148,11 @@ async def _currency_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 async def _currency_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if not ctx.user_data.get("awaiting_currency"):
         return ASK_CURRENCY
-    ctx.user_data["currency"] = update.message.text.strip()[:8]
+    raw = update.message.text.strip()[:8]
+    if not raw:
+        await update.message.reply_text("Please enter a currency symbol (e.g. `€`, `₹`, `GHS`).", parse_mode="Markdown")
+        return ASK_CURRENCY
+    ctx.user_data["currency"] = raw
     ctx.user_data.pop("awaiting_currency", None)
     await update.message.reply_text(
         f"Currency: *{ctx.user_data['currency']}*\n\nWhat *timezone* are you in?",
@@ -190,15 +200,18 @@ async def _finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE, edit_fn=None, 
         onboarded=1,
     )
 
-    vehicle_id = await vehicle_svc.create_vehicle(
-        user_id=db_user["id"],
-        plate_or_nickname=data["plate"],
-        ownership=data["ownership"],
-    )
-
-    remit = data.get("remittance", 0.0)
-    if remit > 0:
-        await vehicle_svc.create_remittance_rule(vehicle_id, remit)
+    existing_vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    if not existing_vehicle:
+        vehicle_id = await vehicle_svc.create_vehicle(
+            user_id=db_user["id"],
+            plate_or_nickname=data["plate"],
+            ownership=data["ownership"],
+        )
+        remit = data.get("remittance", 0.0)
+        if remit > 0:
+            await vehicle_svc.create_remittance_rule(vehicle_id, remit)
+    else:
+        vehicle_id = existing_vehicle["id"]
 
     currency = data["currency"]
     remit_line = f"Daily remittance: *{currency}{remit:,.0f}*\n" if remit > 0 else ""

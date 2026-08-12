@@ -116,19 +116,24 @@ async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 
     async with get_db() as db:
         summary = await db.fetchrow(
-            "SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total FROM trips WHERE passenger_id = $1 AND paid = 0",
-            passenger_id,
+            """SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total
+               FROM trips WHERE passenger_id = $1 AND paid = 0 AND user_id = $2""",
+            passenger_id, db_user["id"],
         )
         await db.execute(
-            "UPDATE trips SET paid = 1 WHERE passenger_id = $1 AND paid = 0", passenger_id
+            "UPDATE trips SET paid = 1 WHERE passenger_id = $1 AND paid = 0 AND user_id = $2",
+            passenger_id, db_user["id"],
         )
         await db.execute(
             """UPDATE passengers
                SET lifetime_revenue = lifetime_revenue + $1, trip_count = trip_count + $2
-               WHERE id = $3""",
-            summary["total"], summary["cnt"], passenger_id,
+               WHERE id = $3 AND user_id = $4""",
+            summary["total"], summary["cnt"], passenger_id, db_user["id"],
         )
-        p = await db.fetchrow("SELECT display_name FROM passengers WHERE id = $1", passenger_id)
+        p = await db.fetchrow(
+            "SELECT display_name FROM passengers WHERE id = $1 AND user_id = $2",
+            passenger_id, db_user["id"],
+        )
 
     name = p["display_name"] if p else "Client"
     amt = format_currency(currency, summary["total"])
@@ -160,7 +165,11 @@ async def handle_report_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         await q.edit_message_text("No vehicle found. Run /start to set up.")
         return
 
-    label = _PERIOD_LABELS.get(period, period.title())
+    if period not in _PERIOD_LABELS:
+        await q.edit_message_text("Invalid period selection.")
+        return
+
+    label = _PERIOD_LABELS.get(period)
     await q.edit_message_text(f"⏳ Building {label} report…")
 
     excel_bytes, filename = await build_report(
@@ -330,6 +339,7 @@ async def handle_delete_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     user_db_id = db_user["id"]
     async with get_db() as db:
         await db.execute("DELETE FROM action_log WHERE user_id = $1", user_db_id)
+        await db.execute("DELETE FROM redo_log   WHERE user_id = $1", user_db_id)
         await db.execute("DELETE FROM trips WHERE user_id = $1", user_db_id)
         await db.execute("DELETE FROM expenses WHERE user_id = $1", user_db_id)
         await db.execute("DELETE FROM passengers WHERE user_id = $1", user_db_id)
