@@ -46,9 +46,16 @@ def _auto_width(ws) -> None:
 
 
 async def build_report(
-    user_id: int, vehicle_id: int, period: str, currency: str
+    user_id: int, vehicle_id: int, period: str, currency: str,
+    cleared_at=None,
 ) -> tuple[bytes, str]:
     start, end, label = _date_range(period)
+
+    effective_start = start
+    if cleared_at:
+        clear_date = cleared_at.date() if hasattr(cleared_at, "date") else cleared_at
+        if clear_date > start:
+            effective_start = clear_date
 
     async with get_db() as db:
         trips = await db.fetch(
@@ -59,8 +66,9 @@ async def build_report(
                WHERE t.user_id = $1
                  AND t.occurred_at::date >= $2
                  AND t.occurred_at::date <= $3
+                 AND ($4::timestamptz IS NULL OR t.occurred_at >= $4)
                ORDER BY t.occurred_at""",
-            user_id, start, end,
+            user_id, effective_start, end, cleared_at,
         )
         expenses = await db.fetch(
             """SELECT occurred_at, type, amount, note, litres
@@ -68,15 +76,17 @@ async def build_report(
                WHERE user_id = $1
                  AND occurred_at::date >= $2
                  AND occurred_at::date <= $3
+                 AND ($4::timestamptz IS NULL OR occurred_at >= $4)
                ORDER BY occurred_at""",
-            user_id, start, end,
+            user_id, effective_start, end, cleared_at,
         )
         remittance = await db.fetch(
             """SELECT paid_on, amount, status
                FROM remittance_log
                WHERE vehicle_id = $1 AND paid_on >= $2 AND paid_on <= $3
+                 AND ($4::timestamptz IS NULL OR created_at >= $4)
                ORDER BY paid_on""",
-            vehicle_id, start, end,
+            vehicle_id, effective_start, end, cleared_at,
         )
 
     wb = openpyxl.Workbook()

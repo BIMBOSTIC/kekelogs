@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     onboarded INTEGER NOT NULL DEFAULT 0,
     morning_push INTEGER NOT NULL DEFAULT 0,
     morning_push_time TEXT NOT NULL DEFAULT '07:00',
+    log_cleared_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -74,7 +75,8 @@ CREATE TABLE IF NOT EXISTS remittance_log (
     amount DOUBLE PRECISION NOT NULL,
     paid_on DATE NOT NULL,
     status TEXT NOT NULL DEFAULT 'PAID',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_remit_vehicle_day UNIQUE (vehicle_id, paid_on)
 );
 
 CREATE TABLE IF NOT EXISTS action_log (
@@ -101,3 +103,4 @@ CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, occurred_
 CREATE INDEX IF NOT EXISTS idx_action_log_user ON action_log(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_passengers_user ON passengers(user_id);
 CREATE INDEX IF NOT EXISTS idx_redo_log_user ON redo_log(user_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_passengers_user_name ON passengers(user_id, LOWER(display_name));

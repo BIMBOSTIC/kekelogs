@@ -358,26 +358,19 @@ async def cmd_clients(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     cleared = db_user.get("log_cleared_at")
 
     async with get_db() as db:
-        if cleared:
-            rows = await db.fetch(
-                """SELECT p.id, p.display_name,
-                          COALESCE(SUM(t.amount), 0) AS lifetime_revenue,
-                          COUNT(t.id) AS trip_count
-                   FROM passengers p
-                   JOIN trips t ON t.passenger_id = p.id AND t.paid = 1 AND t.occurred_at >= $2
-                   WHERE p.user_id = $1
-                   GROUP BY p.id, p.display_name
-                   HAVING COUNT(t.id) > 0
-                   ORDER BY lifetime_revenue DESC LIMIT 10""",
-                db_user["id"], cleared,
-            )
-        else:
-            rows = await db.fetch(
-                """SELECT display_name, lifetime_revenue, trip_count
-                   FROM passengers WHERE user_id = $1 AND trip_count > 0
-                   ORDER BY lifetime_revenue DESC LIMIT 10""",
-                db_user["id"],
-            )
+        rows = await db.fetch(
+            """SELECT p.id, p.display_name,
+                      COALESCE(SUM(t.amount), 0) AS lifetime_revenue,
+                      COUNT(t.id) AS trip_count
+               FROM passengers p
+               JOIN trips t ON t.passenger_id = p.id AND t.paid = 1
+                 AND ($2::timestamptz IS NULL OR t.occurred_at >= $2)
+               WHERE p.user_id = $1
+               GROUP BY p.id, p.display_name
+               HAVING COUNT(t.id) > 0
+               ORDER BY lifetime_revenue DESC LIMIT 10""",
+            db_user["id"], cleared,
+        )
         unpaid_rows = await db.fetch(
             """SELECT p.display_name, COUNT(*) AS cnt, SUM(t.amount) AS total
                FROM trips t JOIN passengers p ON p.id = t.passenger_id
@@ -710,7 +703,8 @@ async def _send_report(message, db_user: dict, period: str) -> None:
     wait_msg = await message.reply_text(f"⏳ Building {label} report…")
 
     excel_bytes, filename = await build_report(
-        db_user["id"], vehicle["id"], period, db_user["currency"]
+        db_user["id"], vehicle["id"], period, db_user["currency"],
+        cleared_at=db_user.get("log_cleared_at"),
     )
 
     doc = io.BytesIO(excel_bytes)

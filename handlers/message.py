@@ -1,4 +1,5 @@
 import json
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from parser.nlp import parse_message
@@ -11,6 +12,8 @@ from handlers.commands import (
     cmd_fuel, cmd_help, cmd_privacy, cmd_report, cmd_edit, cmd_clear,
 )
 from utils.formatting import snapshot_to_hint
+
+_PARSE_RATE_LIMIT = 10  # max parse_message calls per user per 60 seconds
 
 # Single-word commands — route only when text is exactly this word
 _EXACT_CMDS = {
@@ -64,6 +67,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ctx.args = text.split()[1:]
         await _PREFIX_CMDS[words[0]](update, ctx)
         return
+
+    now = time.monotonic()
+    bucket = [t for t in ctx.user_data.get("_rl_calls", []) if now - t < 60]
+    if len(bucket) >= _PARSE_RATE_LIMIT:
+        await update.message.reply_text("Too many requests — please wait a moment.")
+        return
+    ctx.user_data["_rl_calls"] = bucket + [now]
 
     parsed = await parse_message(text)
 

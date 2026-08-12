@@ -94,9 +94,14 @@ async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> None:
     today = date.today()
     async with get_db() as db:
         row = await db.fetchrow(
-            "INSERT INTO remittance_log (vehicle_id, amount, paid_on) VALUES ($1, $2, $3) RETURNING id",
+            """INSERT INTO remittance_log (vehicle_id, amount, paid_on)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (vehicle_id, paid_on) DO NOTHING
+               RETURNING id""",
             vehicle_id, data["amount"], today,
         )
+        if not row:
+            return
         snapshot = json.dumps({"amount": data["amount"], "paid_on": str(today)})
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
@@ -115,20 +120,20 @@ async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     currency = db_user["currency"]
 
     async with get_db() as db:
-        summary = await db.fetchrow(
-            """SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total
-               FROM trips WHERE passenger_id = $1 AND paid = 0 AND user_id = $2""",
+        paid_rows = await db.fetch(
+            "UPDATE trips SET paid = 1 WHERE passenger_id = $1 AND paid = 0 AND user_id = $2 RETURNING amount",
             passenger_id, db_user["id"],
         )
-        await db.execute(
-            "UPDATE trips SET paid = 1 WHERE passenger_id = $1 AND paid = 0 AND user_id = $2",
-            passenger_id, db_user["id"],
-        )
+        if not paid_rows:
+            await q.edit_message_text("No unpaid trips found for this client.")
+            return
+        total = sum(float(r["amount"]) for r in paid_rows)
+        cnt = len(paid_rows)
         await db.execute(
             """UPDATE passengers
                SET lifetime_revenue = lifetime_revenue + $1, trip_count = trip_count + $2
                WHERE id = $3 AND user_id = $4""",
-            summary["total"], summary["cnt"], passenger_id, db_user["id"],
+            total, cnt, passenger_id, db_user["id"],
         )
         p = await db.fetchrow(
             "SELECT display_name FROM passengers WHERE id = $1 AND user_id = $2",
@@ -136,7 +141,7 @@ async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         )
 
     name = p["display_name"] if p else "Client"
-    amt = format_currency(currency, summary["total"])
+    amt = format_currency(currency, total)
     await q.edit_message_text(
         f"✅ *{name}* marked as paid — {amt} settled.",
         parse_mode="Markdown",
@@ -173,7 +178,8 @@ async def handle_report_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     await q.edit_message_text(f"⏳ Building {label} report…")
 
     excel_bytes, filename = await build_report(
-        db_user["id"], vehicle["id"], period, db_user["currency"]
+        db_user["id"], vehicle["id"], period, db_user["currency"],
+        cleared_at=db_user.get("log_cleared_at"),
     )
     doc = io.BytesIO(excel_bytes)
     doc.name = filename

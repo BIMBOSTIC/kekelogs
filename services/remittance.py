@@ -1,5 +1,5 @@
 import json
-from datetime import date, timedelta
+from datetime import date
 from db.database import get_db
 from services.trips import clear_redo_stack
 
@@ -58,44 +58,41 @@ async def get_owing_balance(vehicle_id: int, cleared_at=None) -> float:
             return 0.0
         rate = rate_row["amount"]
 
-        logged = await db.fetch(
-            """SELECT paid_on, status FROM remittance_log
-               WHERE vehicle_id = $1
-                 AND ($2::timestamptz IS NULL OR created_at >= $2)""",
-            vehicle_id, cleared_at,
+        vehicle_start = vehicle["created_at"].date()
+        clear_date = cleared_at.date() if cleared_at else None
+        start = max(vehicle_start, clear_date) if clear_date else vehicle_start
+
+        if start >= today:
+            return 0.0
+
+        owing_count = await db.fetchval(
+            """SELECT COUNT(*)
+               FROM generate_series($1::date, ($2::date - INTERVAL '1 day')::date, INTERVAL '1 day') AS d(day)
+               WHERE d.day NOT IN (
+                   SELECT paid_on FROM remittance_log
+                   WHERE vehicle_id = $3
+                     AND status IN ('PAID', 'REST')
+                     AND ($4::timestamptz IS NULL OR created_at >= $4)
+               )""",
+            start, today, vehicle_id, cleared_at,
         )
 
-    logged_days = {r["paid_on"]: r["status"] for r in logged}
-    vehicle_start = vehicle["created_at"].date()
-    clear_date = cleared_at.date() if cleared_at else None
-    start = max(vehicle_start, clear_date) if clear_date else vehicle_start
-
-    owing = 0.0
-    current = start
-    while current < today:
-        if logged_days.get(current) not in ("PAID", "REST"):
-            owing += rate
-        current += timedelta(days=1)
-
-    return owing
+    return float(owing_count) * rate
 
 
 async def mark_rest_day(vehicle_id: int, user_id: int) -> bool:
     """Mark today as a rest day. Returns False if today already has an entry."""
     today = date.today()
     async with get_db() as db:
-        existing = await db.fetchrow(
-            "SELECT id FROM remittance_log WHERE vehicle_id = $1 AND paid_on = $2",
-            vehicle_id, today,
-        )
-        if existing:
-            return False
-
         row = await db.fetchrow(
             """INSERT INTO remittance_log (vehicle_id, amount, paid_on, status)
-               VALUES ($1, 0, $2, 'REST') RETURNING id""",
+               VALUES ($1, 0, $2, 'REST')
+               ON CONFLICT (vehicle_id, paid_on) DO NOTHING
+               RETURNING id""",
             vehicle_id, today,
         )
+        if not row:
+            return False
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
                VALUES ($1, 'remittance', 'remittance_log', $2, $3)""",
