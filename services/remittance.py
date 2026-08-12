@@ -4,8 +4,12 @@ from db.database import get_db
 from services.trips import clear_redo_stack
 
 
-async def get_today_status(vehicle_id: int) -> dict:
-    """Returns today's remittance status: owing / paid / rest / na (owned car)."""
+async def get_today_status(vehicle_id: int, cleared_at=None) -> dict:
+    """Returns today's remittance status: owing / paid / rest / na (owned car).
+
+    If cleared_at is provided, only remittance entries logged AFTER that timestamp
+    are considered (pre-clear entries are invisible).
+    """
     today = date.today()
     async with get_db() as db:
         rate_row = await db.fetchrow(
@@ -19,8 +23,10 @@ async def get_today_status(vehicle_id: int) -> dict:
             return {"status": "na", "amount": 0.0}
 
         row = await db.fetchrow(
-            "SELECT status, amount FROM remittance_log WHERE vehicle_id = $1 AND paid_on = $2",
-            vehicle_id, today,
+            """SELECT status, amount FROM remittance_log
+               WHERE vehicle_id = $1 AND paid_on = $2
+                 AND ($3::timestamptz IS NULL OR created_at >= $3)""",
+            vehicle_id, today, cleared_at,
         )
 
     if not row:
@@ -28,8 +34,12 @@ async def get_today_status(vehicle_id: int) -> dict:
     return {"status": row["status"].lower(), "amount": row["amount"]}
 
 
-async def get_owing_balance(vehicle_id: int) -> float:
-    """Sum of unpaid remittance days from vehicle creation up to (not including) today."""
+async def get_owing_balance(vehicle_id: int, cleared_at=None) -> float:
+    """Sum of unpaid remittance days up to (not including) today.
+
+    If cleared_at is set, counts only from that date forward so pre-clear
+    history is excluded.
+    """
     today = date.today()
     async with get_db() as db:
         vehicle = await db.fetchrow(
@@ -49,12 +59,17 @@ async def get_owing_balance(vehicle_id: int) -> float:
         rate = rate_row["amount"]
 
         logged = await db.fetch(
-            "SELECT paid_on, status FROM remittance_log WHERE vehicle_id = $1",
-            vehicle_id,
+            """SELECT paid_on, status FROM remittance_log
+               WHERE vehicle_id = $1
+                 AND ($2::timestamptz IS NULL OR created_at >= $2)""",
+            vehicle_id, cleared_at,
         )
 
     logged_days = {r["paid_on"]: r["status"] for r in logged}
-    start = vehicle["created_at"].date()
+    vehicle_start = vehicle["created_at"].date()
+    clear_date = cleared_at.date() if cleared_at else None
+    start = max(vehicle_start, clear_date) if clear_date else vehicle_start
+
     owing = 0.0
     current = start
     while current < today:

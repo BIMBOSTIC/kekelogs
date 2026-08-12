@@ -141,10 +141,10 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     currency = db_user["currency"]
     vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
 
-    remit_info = await get_today_status(vehicle["id"]) if vehicle else {"status": "na", "amount": 0.0}
-    remit_due = remit_info["amount"] if remit_info["status"] not in ("na", "rest") else 0.0
-    owing_balance = await get_owing_balance(vehicle["id"]) if vehicle else 0.0
     cleared = db_user.get("log_cleared_at")
+    remit_info = await get_today_status(vehicle["id"], cleared_at=cleared) if vehicle else {"status": "na", "amount": 0.0}
+    remit_due = remit_info["amount"] if remit_info["status"] not in ("na", "rest") else 0.0
+    owing_balance = await get_owing_balance(vehicle["id"], cleared_at=cleared) if vehicle else 0.0
 
     async with get_db() as db:
         tr = await db.fetchrow(
