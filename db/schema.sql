@@ -87,7 +87,17 @@ CREATE TABLE IF NOT EXISTS action_log (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS redo_log (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    action_type TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    snapshot TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_trips_user_date ON trips(user_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_expenses_user_date ON expenses(user_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_action_log_user ON action_log(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_passengers_user ON passengers(user_id);
+CREATE INDEX IF NOT EXISTS idx_redo_log_user ON redo_log(user_id, created_at);

@@ -1,5 +1,6 @@
-python-telegram-bot[job-queue]==20.7
+python-telegram-bot[job-queue]==21.11.1
 anthropic>=0.28.0
 asyncpg>=0.29.0
 python-dotenv>=1.0.0
 pytz>=2024.1
+openpyxl>=3.1.0

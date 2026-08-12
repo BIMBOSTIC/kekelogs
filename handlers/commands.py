@@ -1,10 +1,12 @@
+import io
 from datetime import date, datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services import users as user_svc
 from services import vehicles as vehicle_svc
-from services.trips import undo_last_action, save_trip
+from services.trips import undo_last_action, redo_last_action, save_trip
 from services.remittance import get_today_status, get_owing_balance, mark_rest_day
+from services.report import build_report, _PERIOD_LABELS
 from db.database import get_db
 from utils.formatting import format_currency
 
@@ -45,6 +47,49 @@ async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
     else:
         await update.message.reply_text("↩️ Last entry removed.")
+
+
+async def cmd_redo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    if not vehicle:
+        await update.message.reply_text("No vehicle found. Run /start to set up.")
+        return
+
+    result = await redo_last_action(db_user["id"], vehicle["id"])
+    if not result:
+        await update.message.reply_text("Nothing to redo.")
+        return
+
+    s = result["snapshot"]
+    currency = db_user["currency"]
+    atype = result["action_type"]
+
+    if atype == "trip":
+        detail = format_currency(currency, s["amount"])
+        if s.get("destination"):
+            detail += f" → {s['destination']}"
+        if s.get("passenger_name"):
+            detail += f" ({s['passenger_name']})"
+        await update.message.reply_text(f"↪️ Redone trip: {detail}")
+    elif atype == "expense":
+        await update.message.reply_text(
+            f"↪️ Redone {s.get('expense_type', 'expense').title()}: {format_currency(currency, s['amount'])}"
+        )
+    elif atype == "remittance":
+        if s.get("status") == "REST":
+            await update.message.reply_text("↪️ Rest day restored.")
+        else:
+            await update.message.reply_text(
+                f"↪️ Redone remittance: {format_currency(currency, s['amount'])}"
+            )
+    else:
+        await update.message.reply_text("↪️ Last entry restored.")
 
 
 async def cmd_day(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -584,6 +629,57 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
+async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    args = ctx.args or []
+    period = args[0].lower() if args else None
+
+    if not period:
+        await update.message.reply_text(
+            "📊 *Export report*\n\nChoose a period:",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Today", callback_data="report:today"),
+                    InlineKeyboardButton("This week", callback_data="report:week"),
+                    InlineKeyboardButton("This month", callback_data="report:month"),
+                ],
+            ]),
+            parse_mode="Markdown",
+        )
+        return
+
+    await _send_report(update.message, db_user, period)
+
+
+async def _send_report(message, db_user: dict, period: str) -> None:
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    if not vehicle:
+        await message.reply_text("No vehicle found. Run /start to set up.")
+        return
+
+    label = _PERIOD_LABELS.get(period, period.title())
+    wait_msg = await message.reply_text(f"⏳ Building {label} report…")
+
+    excel_bytes, filename = await build_report(
+        db_user["id"], vehicle["id"], period, db_user["currency"]
+    )
+
+    doc = io.BytesIO(excel_bytes)
+    doc.name = filename
+    await message.reply_document(
+        doc,
+        caption=f"📊 *{label} report*",
+        parse_mode="Markdown",
+        filename=filename,
+    )
+    await wait_msg.delete()
+
+
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     db_user = await user_svc.get_user(uid)
@@ -601,17 +697,22 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`repair 600 bumper` — repair\n"
         f"`washing 120` — car wash\n"
         f"`remit 1050` — remittance paid\n\n"
-        f"*Commands:*\n"
-        f"`/day 3600` — log full day earnings\n"
-        f"`/undo` — remove last entry\n"
-        f"`/today` — today's profit & break-even\n"
-        f"`/rest` — mark today as a rest day (no remittance)\n"
-        f"`/morning on 07:00` — daily break-even push before your shift\n"
-        f"`/week` — weekly summary\n"
-        f"`/owed` — unpaid trips by client\n"
-        f"`/setremit 1200` — update daily remittance rate\n"
-        f"`/car` — vehicle & remittance settings\n"
-        f"`/privacy` — privacy info\n"
+        f"*Commands (type with or without `/`):*\n"
+        f"`day 3600` — log full day earnings\n"
+        f"`undo` — remove last entry\n"
+        f"`redo` — restore last undone entry\n"
+        f"`today` — today's profit & break-even\n"
+        f"`rest` — mark today as a rest day (no remittance)\n"
+        f"`morning on 07:00` — daily break-even push before your shift\n"
+        f"`week` — weekly summary\n"
+        f"`month` — monthly summary\n"
+        f"`fuel` — fuel cost history\n"
+        f"`owed` — unpaid trips by client\n"
+        f"`clients` — top clients\n"
+        f"`setremit 1200` — update daily remittance rate\n"
+        f"`car` — vehicle & remittance settings\n"
+        f"`report` — export Excel report (week / month / today)\n"
+        f"`privacy` — privacy info\n"
         f"`/deleteme` — delete your account\n",
         parse_mode="Markdown",
     )

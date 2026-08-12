@@ -1,6 +1,7 @@
 import json
 from datetime import date, timedelta
 from db.database import get_db
+from services.trips import clear_redo_stack
 
 
 async def get_today_status(vehicle_id: int) -> dict:
@@ -83,6 +84,8 @@ async def mark_rest_day(vehicle_id: int, user_id: int) -> bool:
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
                VALUES ($1, 'remittance', 'remittance_log', $2, $3)""",
-            user_id, row["id"], json.dumps({"amount": 0, "status": "REST"}),
+            user_id, row["id"],
+            json.dumps({"amount": 0, "status": "REST", "paid_on": str(today)}),
         )
-        return True
+    await clear_redo_stack(user_id)
+    return True

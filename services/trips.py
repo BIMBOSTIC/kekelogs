@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import date, datetime
 from db.database import get_db
 
 
@@ -20,6 +20,11 @@ async def _get_or_create_passenger(db, user_id: int, display_name: str) -> int:
         user_id, display_name.strip(),
     )
     return row["id"]
+
+
+async def clear_redo_stack(user_id: int) -> None:
+    async with get_db() as db:
+        await db.execute("DELETE FROM redo_log WHERE user_id = $1", user_id)
 
 
 async def save_trip(
@@ -69,7 +74,8 @@ async def save_trip(
                 amount, passenger_id,
             )
 
-        return trip_id
+    await clear_redo_stack(user_id)
+    return trip_id
 
 
 async def undo_last_action(user_id: int) -> dict | None:
@@ -84,6 +90,13 @@ async def undo_last_action(user_id: int) -> dict | None:
 
         log = dict(log)
         snapshot = json.loads(log["snapshot"])
+
+        # Save to redo_log before deleting so it can be replayed
+        await db.execute(
+            """INSERT INTO redo_log (user_id, action_type, table_name, snapshot)
+               VALUES ($1, $2, $3, $4)""",
+            user_id, log["action_type"], log["table_name"], log["snapshot"],
+        )
 
         await db.execute(
             f"DELETE FROM {log['table_name']} WHERE id = $1", log["record_id"]
@@ -107,3 +120,75 @@ async def undo_last_action(user_id: int) -> dict | None:
 
         await db.execute("DELETE FROM action_log WHERE id = $1", log["id"])
         return {"action_type": log["action_type"], "snapshot": snapshot}
+
+
+async def redo_last_action(user_id: int, vehicle_id: int) -> dict | None:
+    async with get_db() as db:
+        log = await db.fetchrow(
+            "SELECT * FROM redo_log WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+            user_id,
+        )
+        if not log:
+            return None
+
+        log = dict(log)
+        snapshot = json.loads(log["snapshot"])
+        action_type = log["action_type"]
+        new_id = None
+
+        if action_type == "trip":
+            occurred_at = datetime.fromisoformat(
+                snapshot.get("occurred_at", datetime.now().isoformat())
+            )
+            passenger_id = None
+            if snapshot.get("passenger_name"):
+                passenger_id = await _get_or_create_passenger(
+                    db, user_id, snapshot["passenger_name"]
+                )
+            paid = snapshot.get("paid", True)
+            row = await db.fetchrow(
+                """INSERT INTO trips
+                   (user_id, vehicle_id, amount, destination, passenger_id, paid, payment_method, occurred_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id""",
+                user_id, vehicle_id, snapshot["amount"], snapshot.get("destination"),
+                passenger_id, int(paid), snapshot.get("payment_method", "CASH"), occurred_at,
+            )
+            new_id = row["id"]
+            if passenger_id and paid:
+                await db.execute(
+                    """UPDATE passengers
+                       SET lifetime_revenue = lifetime_revenue + $1, trip_count = trip_count + 1
+                       WHERE id = $2""",
+                    snapshot["amount"], passenger_id,
+                )
+
+        elif action_type == "expense":
+            row = await db.fetchrow(
+                """INSERT INTO expenses
+                   (user_id, vehicle_id, type, amount, note, litres, odometer)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id""",
+                user_id, vehicle_id, snapshot["expense_type"], snapshot["amount"],
+                snapshot.get("note"), snapshot.get("litres"), snapshot.get("odometer"),
+            )
+            new_id = row["id"]
+
+        elif action_type == "remittance":
+            status = snapshot.get("status", "PAID")
+            paid_on_raw = snapshot.get("paid_on", str(date.today()))
+            paid_on = date.fromisoformat(paid_on_raw) if isinstance(paid_on_raw, str) else paid_on_raw
+            row = await db.fetchrow(
+                """INSERT INTO remittance_log (vehicle_id, amount, paid_on, status)
+                   VALUES ($1, $2, $3, $4) RETURNING id""",
+                vehicle_id, snapshot.get("amount", 0), paid_on, status,
+            )
+            new_id = row["id"]
+
+        if new_id:
+            await db.execute(
+                """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
+                   VALUES ($1, $2, $3, $4, $5)""",
+                user_id, action_type, log["table_name"], new_id, log["snapshot"],
+            )
+
+        await db.execute("DELETE FROM redo_log WHERE id = $1", log["id"])
+        return {"action_type": action_type, "snapshot": snapshot}

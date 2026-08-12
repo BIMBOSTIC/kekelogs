@@ -5,6 +5,35 @@ from parser.nlp import parse_message
 from services import users as user_svc
 from services import vehicles as vehicle_svc
 from utils.formatting import format_currency
+from handlers.commands import (
+    cmd_undo, cmd_redo, cmd_day, cmd_today, cmd_week, cmd_month,
+    cmd_clients, cmd_owed, cmd_setremit, cmd_car, cmd_rest, cmd_morning,
+    cmd_fuel, cmd_help, cmd_privacy, cmd_report,
+)
+
+# Single-word commands — route only when text is exactly this word
+_EXACT_CMDS = {
+    "undo": cmd_undo,
+    "redo": cmd_redo,
+    "today": cmd_today,
+    "week": cmd_week,
+    "month": cmd_month,
+    "clients": cmd_clients,
+    "owed": cmd_owed,
+    "car": cmd_car,
+    "rest": cmd_rest,
+    "help": cmd_help,
+    "privacy": cmd_privacy,
+    "fuel": cmd_fuel,
+}
+
+# First-word commands — route when text starts with this word, pass remainder as args
+_PREFIX_CMDS = {
+    "day": cmd_day,
+    "setremit": cmd_setremit,
+    "morning": cmd_morning,
+    "report": cmd_report,
+}
 
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -16,6 +45,18 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Please set up your account first with /start")
         return
 
+    # Command keyword routing — no slash needed
+    lower = text.lower()
+    if lower in _EXACT_CMDS:
+        await _EXACT_CMDS[lower](update, ctx)
+        return
+
+    words = lower.split()
+    if words[0] in _PREFIX_CMDS:
+        ctx.args = text.split()[1:]
+        await _PREFIX_CMDS[words[0]](update, ctx)
+        return
+
     parsed = await parse_message(text)
 
     if not parsed:
@@ -23,8 +64,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "I didn't understand that. Try:\n"
             "`450` — log a trip\n"
             "`fuel 2000` — log fuel\n"
-            "`/day 3600` — log full day\n"
-            "`/help` — all commands",
+            "`day 3600` — log full day\n"
+            "`help` — all commands",
             parse_mode="Markdown",
         )
         return

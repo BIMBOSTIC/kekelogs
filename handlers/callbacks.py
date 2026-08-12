@@ -1,10 +1,12 @@
+import io
 import json
 from datetime import date
 from telegram import Update
 from telegram.ext import ContextTypes
 from services import users as user_svc
 from services import vehicles as vehicle_svc
-from services.trips import save_trip
+from services.trips import save_trip, clear_redo_stack
+from services.report import build_report, _PERIOD_LABELS
 from db.database import get_db
 from utils.formatting import format_currency
 
@@ -74,26 +76,31 @@ async def _save_expense(user_id: int, vehicle_id: int, data: dict) -> None:
             "expense_type": data["expense_type"],
             "amount": data["amount"],
             "note": data.get("note"),
+            "litres": data.get("litres"),
+            "odometer": data.get("odometer"),
         })
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
                VALUES ($1, 'expense', 'expenses', $2, $3)""",
             user_id, row["id"], snapshot,
         )
+    await clear_redo_stack(user_id)
 
 
 async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> None:
+    today = date.today()
     async with get_db() as db:
         row = await db.fetchrow(
             "INSERT INTO remittance_log (vehicle_id, amount, paid_on) VALUES ($1, $2, $3) RETURNING id",
-            vehicle_id, data["amount"], date.today(),
+            vehicle_id, data["amount"], today,
         )
-        snapshot = json.dumps({"amount": data["amount"]})
+        snapshot = json.dumps({"amount": data["amount"], "paid_on": str(today)})
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
                VALUES ($1, 'remittance', 'remittance_log', $2, $3)""",
             user_id, row["id"], snapshot,
         )
+    await clear_redo_stack(user_id)
 
 
 async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -133,6 +140,37 @@ async def handle_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await q.answer()
     ctx.user_data.pop("pending", None)
     await q.edit_message_text("Cancelled.")
+
+
+async def handle_report_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    period = q.data.split(":", 1)[1]
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user:
+        await q.edit_message_text("Please run /start first.")
+        return
+
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    if not vehicle:
+        await q.edit_message_text("No vehicle found. Run /start to set up.")
+        return
+
+    label = _PERIOD_LABELS.get(period, period.title())
+    await q.edit_message_text(f"⏳ Building {label} report…")
+
+    excel_bytes, filename = await build_report(
+        db_user["id"], vehicle["id"], period, db_user["currency"]
+    )
+    doc = io.BytesIO(excel_bytes)
+    doc.name = filename
+    await q.message.reply_document(
+        doc,
+        caption=f"📊 *{label} report*",
+        parse_mode="Markdown",
+        filename=filename,
+    )
 
 
 async def handle_delete_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

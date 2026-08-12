@@ -8,11 +8,11 @@ from config import TELEGRAM_TOKEN, LOG_LEVEL
 from db.database import init_db
 from handlers.start import build_start_handler
 from handlers.message import handle_text
-from handlers.callbacks import handle_confirm, handle_cancel, handle_delete_confirm, handle_mark_paid
+from handlers.callbacks import handle_confirm, handle_cancel, handle_delete_confirm, handle_mark_paid, handle_report_select
 from handlers.commands import (
-    cmd_undo, cmd_day, cmd_today, cmd_week, cmd_month,
+    cmd_undo, cmd_redo, cmd_day, cmd_today, cmd_week, cmd_month,
     cmd_clients, cmd_owed, cmd_setremit, cmd_car, cmd_rest, cmd_morning,
-    cmd_fuel, cmd_help, cmd_privacy, cmd_deleteme,
+    cmd_fuel, cmd_help, cmd_privacy, cmd_deleteme, cmd_report,
 )
 from services.morning import schedule_all_morning_pushes
 
@@ -36,6 +36,7 @@ def main() -> None:
     app.add_handler(build_start_handler())
 
     app.add_handler(CommandHandler("undo", cmd_undo))
+    app.add_handler(CommandHandler("redo", cmd_redo))
     app.add_handler(CommandHandler("day", cmd_day))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("week", cmd_week))
@@ -50,11 +51,13 @@ def main() -> None:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("privacy", cmd_privacy))
     app.add_handler(CommandHandler("deleteme", cmd_deleteme))
+    app.add_handler(CommandHandler("report", cmd_report))
 
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^ct:"))
     app.add_handler(CallbackQueryHandler(handle_cancel, pattern="^cn:"))
     app.add_handler(CallbackQueryHandler(handle_mark_paid, pattern="^paid:"))
     app.add_handler(CallbackQueryHandler(handle_delete_confirm, pattern="^delete:"))
+    app.add_handler(CallbackQueryHandler(handle_report_select, pattern="^report:"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
