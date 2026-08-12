@@ -1,4 +1,5 @@
 import io
+import json
 from datetime import date, datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -8,7 +9,7 @@ from services.trips import undo_last_action, redo_last_action, save_trip
 from services.remittance import get_today_status, get_owing_balance, mark_rest_day
 from services.report import build_report, _PERIOD_LABELS
 from db.database import get_db
-from utils.formatting import format_currency
+from utils.formatting import format_currency, format_log_label
 
 
 async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -143,15 +144,22 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     remit_info = await get_today_status(vehicle["id"]) if vehicle else {"status": "na", "amount": 0.0}
     remit_due = remit_info["amount"] if remit_info["status"] not in ("na", "rest") else 0.0
     owing_balance = await get_owing_balance(vehicle["id"]) if vehicle else 0.0
+    cleared = db_user.get("log_cleared_at")
 
     async with get_db() as db:
         tr = await db.fetchrow(
-            "SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt FROM trips WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 1",
-            db_user["id"], today,
+            """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
+               FROM trips
+               WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 1
+                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+            db_user["id"], today, cleared,
         )
         ex = await db.fetchrow(
-            "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE user_id = $1 AND DATE(occurred_at) = $2",
-            db_user["id"], today,
+            """SELECT COALESCE(SUM(amount), 0) AS total
+               FROM expenses
+               WHERE user_id = $1 AND DATE(occurred_at) = $2
+                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+            db_user["id"], today, cleared,
         )
 
     gross = tr["gross"]
@@ -204,23 +212,25 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     today = date.today()
     week_start = today - timedelta(days=6)
+    cleared = db_user.get("log_cleared_at")
+    effective_start = max(week_start, cleared.date()) if cleared and cleared.date() > week_start else week_start
 
     async with get_db() as db:
         trip_rows = await db.fetch(
             """SELECT DATE(occurred_at) AS day, COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
                FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2 AND paid = 1
                GROUP BY DATE(occurred_at)""",
-            db_user["id"], week_start,
+            db_user["id"], effective_start,
         )
         expense_rows = await db.fetch(
             """SELECT DATE(occurred_at) AS day, COALESCE(SUM(amount), 0) AS costs
                FROM expenses WHERE user_id = $1 AND DATE(occurred_at) >= $2
                GROUP BY DATE(occurred_at)""",
-            db_user["id"], week_start,
+            db_user["id"], effective_start,
         )
         remit_rows = await db.fetch(
             "SELECT paid_on AS day, status FROM remittance_log WHERE vehicle_id = $1 AND paid_on >= $2",
-            vehicle["id"] if vehicle else 0, week_start,
+            vehicle["id"] if vehicle else 0, effective_start,
         ) if vehicle else []
 
     trips_by_day = {r["day"]: (r["gross"], r["cnt"]) for r in trip_rows}
@@ -228,13 +238,18 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     remit_by_day = {r["day"]: r["status"] for r in remit_rows}
 
     days = []
-    for i in range(7):
-        d = week_start + timedelta(days=i)
+    d = effective_start
+    while d <= today:
         gross, cnt = trips_by_day.get(d, (0.0, 0))
         costs = costs_by_day.get(d, 0.0)
         remit = 0.0 if remit_by_day.get(d) == "REST" else remit_rate
         profit = gross - costs - remit
         days.append({"date": d, "gross": gross, "profit": profit, "cnt": cnt})
+        d += timedelta(days=1)
+
+    if not days:
+        await update.message.reply_text("No data yet since your last clear.")
+        return
 
     profits = [d["profit"] for d in days]
     best = max(days, key=lambda d: d["profit"])
@@ -244,7 +259,8 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     week_gross = sum(d["gross"] for d in days)
     week_profit = sum(d["profit"] for d in days)
 
-    lines = ["📅 *Last 7 days*\n"]
+    header = "📅 *Since clear*\n" if cleared and cleared.date() > week_start else "📅 *Last 7 days*\n"
+    lines = [header]
     for d in days:
         profit = d["profit"]
         bar_len = min(8, round(abs(profit) / bar_max * 8))
@@ -277,24 +293,26 @@ async def cmd_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     now = datetime.now()
     month_start = date(now.year, now.month, 1)
     month_name = now.strftime("%B %Y")
+    cleared = db_user.get("log_cleared_at")
+    effective_start = max(month_start, cleared.date()) if cleared and cleared.date() > month_start else month_start
 
     async with get_db() as db:
         tr = await db.fetchrow(
             """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS trips,
                       COUNT(DISTINCT DATE(occurred_at)) AS days
                FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2 AND paid = 1""",
-            db_user["id"], month_start,
+            db_user["id"], effective_start,
         )
         ex_rows = await db.fetch(
             """SELECT type, COALESCE(SUM(amount), 0) AS total
                FROM expenses WHERE user_id = $1 AND DATE(occurred_at) >= $2
                GROUP BY type ORDER BY total DESC""",
-            db_user["id"], month_start,
+            db_user["id"], effective_start,
         )
         remit = await db.fetchrow(
             """SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS days_paid
                FROM remittance_log WHERE vehicle_id = $1 AND paid_on >= $2 AND status = 'PAID'""",
-            vehicle["id"] if vehicle else 0, month_start,
+            vehicle["id"] if vehicle else 0, effective_start,
         ) if vehicle else None
 
     gross = tr["gross"]
@@ -337,20 +355,36 @@ async def cmd_clients(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     currency = db_user["currency"]
+    cleared = db_user.get("log_cleared_at")
 
     async with get_db() as db:
-        rows = await db.fetch(
-            """SELECT display_name, lifetime_revenue, trip_count
-               FROM passengers WHERE user_id = $1 AND trip_count > 0
-               ORDER BY lifetime_revenue DESC LIMIT 10""",
-            db_user["id"],
-        )
+        if cleared:
+            rows = await db.fetch(
+                """SELECT p.id, p.display_name,
+                          COALESCE(SUM(t.amount), 0) AS lifetime_revenue,
+                          COUNT(t.id) AS trip_count
+                   FROM passengers p
+                   JOIN trips t ON t.passenger_id = p.id AND t.paid = 1 AND t.occurred_at >= $2
+                   WHERE p.user_id = $1
+                   GROUP BY p.id, p.display_name
+                   HAVING COUNT(t.id) > 0
+                   ORDER BY lifetime_revenue DESC LIMIT 10""",
+                db_user["id"], cleared,
+            )
+        else:
+            rows = await db.fetch(
+                """SELECT display_name, lifetime_revenue, trip_count
+                   FROM passengers WHERE user_id = $1 AND trip_count > 0
+                   ORDER BY lifetime_revenue DESC LIMIT 10""",
+                db_user["id"],
+            )
         unpaid_rows = await db.fetch(
             """SELECT p.display_name, COUNT(*) AS cnt, SUM(t.amount) AS total
                FROM trips t JOIN passengers p ON p.id = t.passenger_id
                WHERE t.user_id = $1 AND t.paid = 0
+                 AND ($2::timestamptz IS NULL OR t.occurred_at >= $2)
                GROUP BY p.display_name""",
-            db_user["id"],
+            db_user["id"], cleared,
         )
 
     if not rows:
@@ -389,19 +423,22 @@ async def cmd_owed(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     currency = db_user["currency"]
+    cleared = db_user.get("log_cleared_at")
     async with get_db() as db:
         named = await db.fetch(
             """SELECT p.id, p.display_name, COUNT(*) AS cnt, SUM(t.amount) AS total
                FROM trips t JOIN passengers p ON p.id = t.passenger_id
                WHERE t.user_id = $1 AND t.paid = 0
+                 AND ($2::timestamptz IS NULL OR t.occurred_at >= $2)
                GROUP BY p.id, p.display_name
                ORDER BY total DESC""",
-            db_user["id"],
+            db_user["id"], cleared,
         )
         unnamed = await db.fetchrow(
             """SELECT COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total
-               FROM trips WHERE user_id = $1 AND paid = 0 AND passenger_id IS NULL""",
-            db_user["id"],
+               FROM trips WHERE user_id = $1 AND paid = 0 AND passenger_id IS NULL
+                 AND ($2::timestamptz IS NULL OR occurred_at >= $2)""",
+            db_user["id"], cleared,
         )
 
     total_owed = sum(r["total"] for r in named) + unnamed["total"]
@@ -595,15 +632,18 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     currency = db_user["currency"]
+    cleared = db_user.get("log_cleared_at")
 
     async with get_db() as db:
         rows = await db.fetch(
             """SELECT DATE_TRUNC('month', occurred_at) AS month,
                       SUM(amount) AS total, SUM(litres) AS total_litres, COUNT(*) AS fills
-               FROM expenses WHERE user_id = $1 AND type = 'FUEL'
+               FROM expenses
+               WHERE user_id = $1 AND type = 'FUEL'
+                 AND ($2::timestamptz IS NULL OR occurred_at >= $2)
                GROUP BY DATE_TRUNC('month', occurred_at)
                ORDER BY month DESC LIMIT 6""",
-            db_user["id"],
+            db_user["id"], cleared,
         )
 
     if not rows:
@@ -680,6 +720,57 @@ async def _send_report(message, db_user: dict, period: str) -> None:
     await wait_msg.delete()
 
 
+async def cmd_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    async with get_db() as db:
+        logs = await db.fetch(
+            "SELECT id, action_type, snapshot FROM action_log WHERE user_id = $1 ORDER BY created_at DESC LIMIT 3",
+            db_user["id"],
+        )
+
+    if not logs:
+        await update.message.reply_text("No recent entries to edit.")
+        return
+
+    currency = db_user["currency"]
+    buttons = []
+    for log in logs:
+        snap = json.loads(log["snapshot"])
+        label = format_log_label(log["action_type"], snap, currency)
+        buttons.append([InlineKeyboardButton(f"✏️ {label}", callback_data=f"edit_sel:{log['id']}")])
+
+    await update.message.reply_text(
+        "✏️ *Edit an entry*\n\nSelect which one to edit:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    await update.message.reply_text(
+        "⚠️ *Clear your logs?*\n\n"
+        "All views (today, week, month, fuel, clients) will start fresh from now.\n"
+        "Your data is never deleted — export your full history anytime with `report`.\n\n"
+        "_Undo and redo history will also be cleared._",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✓ Clear now", callback_data="logclear:confirm"),
+            InlineKeyboardButton("✗ Cancel", callback_data="logclear:cancel"),
+        ]]),
+        parse_mode="Markdown",
+    )
+
+
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     db_user = await user_svc.get_user(uid)
@@ -701,6 +792,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`day 3600` — log full day earnings\n"
         f"`undo` — remove last entry\n"
         f"`redo` — restore last undone entry\n"
+        f"`edit` — edit one of the last 3 entries\n"
+        f"`clear` — start fresh (data kept, views reset)\n"
         f"`today` — today's profit & break-even\n"
         f"`rest` — mark today as a rest day (no remittance)\n"
         f"`morning on 07:00` — daily break-even push before your shift\n"

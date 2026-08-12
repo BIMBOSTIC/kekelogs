@@ -8,8 +8,9 @@ from utils.formatting import format_currency
 from handlers.commands import (
     cmd_undo, cmd_redo, cmd_day, cmd_today, cmd_week, cmd_month,
     cmd_clients, cmd_owed, cmd_setremit, cmd_car, cmd_rest, cmd_morning,
-    cmd_fuel, cmd_help, cmd_privacy, cmd_report,
+    cmd_fuel, cmd_help, cmd_privacy, cmd_report, cmd_edit, cmd_clear,
 )
+from utils.formatting import snapshot_to_hint
 
 # Single-word commands — route only when text is exactly this word
 _EXACT_CMDS = {
@@ -25,6 +26,8 @@ _EXACT_CMDS = {
     "help": cmd_help,
     "privacy": cmd_privacy,
     "fuel": cmd_fuel,
+    "edit": cmd_edit,
+    "clear": cmd_clear,
 }
 
 # First-word commands — route when text starts with this word, pass remainder as args
@@ -43,6 +46,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     db_user = await user_svc.get_user(uid)
     if not db_user or not db_user["onboarded"]:
         await update.message.reply_text("Please set up your account first with /start")
+        return
+
+    # Editing state: user tapped an entry and must send corrected text
+    if ctx.user_data.get("editing"):
+        await _handle_edit_reply(update, ctx, db_user)
         return
 
     # Command keyword routing — no slash needed
@@ -167,6 +175,72 @@ async def _confirm_remittance(update, ctx, parsed, currency, user_db_id):
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("✓ Save", callback_data="ct:remittance"),
             InlineKeyboardButton("✗ Cancel", callback_data="cn:remittance"),
+        ]]),
+        parse_mode="Markdown",
+    )
+
+
+async def _handle_edit_reply(update, ctx, db_user: dict) -> None:
+    text = update.message.text.strip()
+    editing = ctx.user_data["editing"]
+
+    if text.lower() in ("cancel", "/cancel"):
+        ctx.user_data.pop("editing", None)
+        ctx.user_data.pop("pending_edit", None)
+        await update.message.reply_text("Edit cancelled.")
+        return
+
+    parsed = await parse_message(text)
+    if not parsed:
+        await update.message.reply_text(
+            "Couldn't parse that. Try again or type `cancel` to exit.",
+            parse_mode="Markdown",
+        )
+        return
+
+    atype = editing["action_type"]
+    if parsed["type"] != atype:
+        hints = {
+            "trip": "a trip amount e.g. `500 kyrenia`",
+            "expense": "an expense e.g. `fuel 2000`",
+            "remittance": "a remittance e.g. `remit 1050`",
+        }
+        await update.message.reply_text(
+            f"This entry is a *{atype}* — send {hints.get(atype, 'the correct type')}.\n"
+            "Type `cancel` to exit.",
+            parse_mode="Markdown",
+        )
+        return
+
+    currency = db_user["currency"]
+    ctx.user_data["pending_edit"] = {**editing, "new_parsed": parsed}
+
+    if atype == "trip":
+        lines = [f"*{format_currency(currency, parsed['amount'])}*"]
+        if parsed.get("destination"):
+            lines.append(f"To: {parsed['destination']}")
+        if parsed.get("passenger"):
+            lines.append(f"Client: {parsed['passenger']}")
+        lines.append("Paid: Yes" if parsed.get("paid", True) else "Paid: No (unpaid)")
+        old = snapshot_to_hint(atype, editing["old_snapshot"])
+        content = f"Old: `{old}`\nNew:\n" + "\n".join(lines)
+    elif atype == "expense":
+        old = snapshot_to_hint(atype, editing["old_snapshot"])
+        content = (
+            f"Old: `{old}`\n"
+            f"New: *{parsed['expense_type'].title()}* — {format_currency(currency, parsed['amount'])}"
+        )
+        if parsed.get("litres"):
+            content += f"  ({parsed['litres']}L)"
+    else:
+        old = snapshot_to_hint(atype, editing["old_snapshot"])
+        content = f"Old: `{old}`\nNew: Remit *{format_currency(currency, parsed['amount'])}*"
+
+    await update.message.reply_text(
+        f"✏️ *Save edit?*\n\n{content}",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✓ Save", callback_data="edit_ok"),
+            InlineKeyboardButton("✗ Cancel", callback_data="edit_no"),
         ]]),
         parse_mode="Markdown",
     )

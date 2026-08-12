@@ -8,11 +8,16 @@ from config import TELEGRAM_TOKEN, LOG_LEVEL
 from db.database import init_db
 from handlers.start import build_start_handler
 from handlers.message import handle_text
-from handlers.callbacks import handle_confirm, handle_cancel, handle_delete_confirm, handle_mark_paid, handle_report_select
+from handlers.callbacks import (
+    handle_confirm, handle_cancel, handle_delete_confirm, handle_mark_paid,
+    handle_report_select, handle_edit_select, handle_edit_confirm,
+    handle_edit_cancel_inline, handle_clear_confirm,
+)
 from handlers.commands import (
     cmd_undo, cmd_redo, cmd_day, cmd_today, cmd_week, cmd_month,
     cmd_clients, cmd_owed, cmd_setremit, cmd_car, cmd_rest, cmd_morning,
     cmd_fuel, cmd_help, cmd_privacy, cmd_deleteme, cmd_report,
+    cmd_edit, cmd_clear,
 )
 from services.morning import schedule_all_morning_pushes
 
@@ -52,12 +57,18 @@ def main() -> None:
     app.add_handler(CommandHandler("privacy", cmd_privacy))
     app.add_handler(CommandHandler("deleteme", cmd_deleteme))
     app.add_handler(CommandHandler("report", cmd_report))
+    app.add_handler(CommandHandler("edit", cmd_edit))
+    app.add_handler(CommandHandler("clear", cmd_clear))
 
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^ct:"))
     app.add_handler(CallbackQueryHandler(handle_cancel, pattern="^cn:"))
     app.add_handler(CallbackQueryHandler(handle_mark_paid, pattern="^paid:"))
     app.add_handler(CallbackQueryHandler(handle_delete_confirm, pattern="^delete:"))
     app.add_handler(CallbackQueryHandler(handle_report_select, pattern="^report:"))
+    app.add_handler(CallbackQueryHandler(handle_edit_select, pattern="^edit_sel:"))
+    app.add_handler(CallbackQueryHandler(handle_edit_confirm, pattern="^edit_ok$"))
+    app.add_handler(CallbackQueryHandler(handle_edit_cancel_inline, pattern="^edit_no$"))
+    app.add_handler(CallbackQueryHandler(handle_clear_confirm, pattern="^logclear:"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 

@@ -19,6 +19,9 @@ async def init_db() -> None:
         await conn.execute(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS morning_push_time TEXT NOT NULL DEFAULT '07:00'"
         )
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS log_cleared_at TIMESTAMPTZ"
+        )
 
 
 @asynccontextmanager

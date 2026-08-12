@@ -192,3 +192,98 @@ async def redo_last_action(user_id: int, vehicle_id: int) -> dict | None:
 
         await db.execute("DELETE FROM redo_log WHERE id = $1", log["id"])
         return {"action_type": action_type, "snapshot": snapshot}
+
+
+async def update_trip(
+    record_id: int,
+    user_id: int,
+    vehicle_id: int,
+    parsed: dict,
+    old_snapshot: dict,
+) -> None:
+    async with get_db() as db:
+        # Reverse old passenger stats if the original trip was a paid named trip
+        old_pname = old_snapshot.get("passenger_name")
+        old_paid = old_snapshot.get("paid", True)
+        if old_pname and old_paid:
+            p = await db.fetchrow(
+                "SELECT id FROM passengers WHERE user_id = $1 AND LOWER(display_name) = $2",
+                user_id, old_pname.lower(),
+            )
+            if p:
+                await db.execute(
+                    """UPDATE passengers
+                       SET lifetime_revenue = GREATEST(0, lifetime_revenue - $1),
+                           trip_count = GREATEST(0, trip_count - 1)
+                       WHERE id = $2""",
+                    old_snapshot["amount"], p["id"],
+                )
+
+        new_pname = parsed.get("passenger")
+        new_paid = parsed.get("paid", True)
+        new_amount = parsed["amount"]
+        passenger_id = None
+        if new_pname:
+            passenger_id = await _get_or_create_passenger(db, user_id, new_pname)
+
+        await db.execute(
+            """UPDATE trips
+               SET amount=$1, destination=$2, passenger_id=$3, paid=$4, payment_method=$5
+               WHERE id=$6""",
+            new_amount, parsed.get("destination"), passenger_id,
+            int(new_paid), parsed.get("payment_method", "CASH"), record_id,
+        )
+
+        if passenger_id and new_paid:
+            await db.execute(
+                """UPDATE passengers
+                   SET lifetime_revenue = lifetime_revenue + $1, trip_count = trip_count + 1
+                   WHERE id = $2""",
+                new_amount, passenger_id,
+            )
+
+        new_snapshot = json.dumps({
+            "amount": new_amount,
+            "destination": parsed.get("destination"),
+            "passenger_name": new_pname,
+            "paid": new_paid,
+            "payment_method": parsed.get("payment_method", "CASH"),
+            "occurred_at": old_snapshot.get("occurred_at"),
+        })
+        await db.execute(
+            "UPDATE action_log SET snapshot=$1 WHERE user_id=$2 AND table_name='trips' AND record_id=$3",
+            new_snapshot, user_id, record_id,
+        )
+
+
+async def update_expense(record_id: int, user_id: int, parsed: dict) -> None:
+    async with get_db() as db:
+        await db.execute(
+            """UPDATE expenses
+               SET type=$1, amount=$2, note=$3, litres=$4, odometer=$5
+               WHERE id=$6""",
+            parsed["expense_type"], parsed["amount"],
+            parsed.get("note"), parsed.get("litres"), parsed.get("odometer"),
+            record_id,
+        )
+        new_snapshot = json.dumps({
+            "expense_type": parsed["expense_type"],
+            "amount": parsed["amount"],
+            "note": parsed.get("note"),
+            "litres": parsed.get("litres"),
+            "odometer": parsed.get("odometer"),
+        })
+        await db.execute(
+            "UPDATE action_log SET snapshot=$1 WHERE user_id=$2 AND table_name='expenses' AND record_id=$3",
+            new_snapshot, user_id, record_id,
+        )
+
+
+async def update_remittance_entry(record_id: int, vehicle_id: int, user_id: int, amount: float) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE remittance_log SET amount=$1 WHERE id=$2", amount, record_id)
+        new_snapshot = json.dumps({"amount": amount})
+        await db.execute(
+            "UPDATE action_log SET snapshot=$1 WHERE user_id=$2 AND table_name='remittance_log' AND record_id=$3",
+            new_snapshot, user_id, record_id,
+        )

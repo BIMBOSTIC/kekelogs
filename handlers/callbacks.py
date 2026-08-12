@@ -5,10 +5,13 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from services import users as user_svc
 from services import vehicles as vehicle_svc
-from services.trips import save_trip, clear_redo_stack
+from services.trips import (
+    save_trip, clear_redo_stack,
+    update_trip, update_expense, update_remittance_entry,
+)
 from services.report import build_report, _PERIOD_LABELS
 from db.database import get_db
-from utils.formatting import format_currency
+from utils.formatting import format_currency, snapshot_to_hint, format_log_label
 
 
 async def handle_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -170,6 +173,130 @@ async def handle_report_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         caption=f"📊 *{label} report*",
         parse_mode="Markdown",
         filename=filename,
+    )
+
+
+async def handle_edit_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    log_id = int(q.data.split(":", 1)[1])
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+
+    async with get_db() as db:
+        log = await db.fetchrow(
+            "SELECT * FROM action_log WHERE id = $1 AND user_id = $2",
+            log_id, db_user["id"],
+        )
+
+    if not log:
+        await q.edit_message_text("Entry not found — it may have been undone already.")
+        return
+
+    log = dict(log)
+    snapshot = json.loads(log["snapshot"])
+
+    if log["action_type"] == "remittance" and snapshot.get("status") == "REST":
+        await q.edit_message_text(
+            "Rest days can't be edited.\nUse `undo` then log `rest` again if needed.",
+            parse_mode="Markdown",
+        )
+        return
+
+    hint = snapshot_to_hint(log["action_type"], snapshot)
+    ctx.user_data["editing"] = {
+        "log_id": log_id,
+        "record_id": log["record_id"],
+        "action_type": log["action_type"],
+        "table_name": log["table_name"],
+        "old_snapshot": snapshot,
+    }
+
+    await q.edit_message_text(
+        f"✏️ *Editing entry*\n\nCurrent: `{hint}`\n\n"
+        "Send your corrected entry, or type `cancel` to exit.",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_edit_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    uid = update.effective_user.id
+
+    pending = ctx.user_data.pop("pending_edit", None)
+    ctx.user_data.pop("editing", None)
+
+    if not pending:
+        await q.edit_message_text("Edit expired — please try `edit` again.", parse_mode="Markdown")
+        return
+
+    db_user = await user_svc.get_user(uid)
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    currency = db_user["currency"]
+    atype = pending["action_type"]
+    parsed = pending["new_parsed"]
+
+    if atype == "trip":
+        await update_trip(
+            pending["record_id"], db_user["id"], vehicle["id"],
+            parsed, pending["old_snapshot"],
+        )
+        await q.edit_message_text(
+            f"✅ Trip updated — *{format_currency(currency, parsed['amount'])}*",
+            parse_mode="Markdown",
+        )
+    elif atype == "expense":
+        await update_expense(pending["record_id"], db_user["id"], parsed)
+        await q.edit_message_text(
+            f"✅ {parsed['expense_type'].title()} updated — *{format_currency(currency, parsed['amount'])}*",
+            parse_mode="Markdown",
+        )
+    elif atype == "remittance":
+        await update_remittance_entry(
+            pending["record_id"], vehicle["id"], db_user["id"], parsed["amount"]
+        )
+        await q.edit_message_text(
+            f"✅ Remittance updated — *{format_currency(currency, parsed['amount'])}*",
+            parse_mode="Markdown",
+        )
+
+
+async def handle_edit_cancel_inline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    ctx.user_data.pop("pending_edit", None)
+    ctx.user_data.pop("editing", None)
+    await q.edit_message_text("Edit cancelled.")
+
+
+async def handle_clear_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    action = q.data.split(":", 1)[1]
+
+    if action == "cancel":
+        await q.edit_message_text("Cancelled — your logs are unchanged.")
+        return
+
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user:
+        await q.edit_message_text("Account not found.")
+        return
+
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE users SET log_cleared_at = NOW() WHERE telegram_id = $1", uid
+        )
+        await db.execute("DELETE FROM action_log WHERE user_id = $1", db_user["id"])
+        await db.execute("DELETE FROM redo_log   WHERE user_id = $1", db_user["id"])
+
+    await q.edit_message_text(
+        "✅ *Logs cleared.*\n\n"
+        "All views start fresh from now.\n"
+        "Your data is safe — use `report` to export your full history.",
+        parse_mode="Markdown",
     )
 
 
