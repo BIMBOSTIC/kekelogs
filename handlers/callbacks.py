@@ -64,13 +64,20 @@ async def handle_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     elif entry_type == "remittance":
         saved = await _save_remittance(db_user["id"], vehicle["id"], data)
         if not saved:
+            paid_on_str = data.get("paid_on", str(date.today()))
+            day_label = "today" if paid_on_str == str(date.today()) else date.fromisoformat(paid_on_str).strftime("%d %b")
             await q.edit_message_text(
-                "⚠️ Remittance already logged today.\nUse `undo` first if you need to change it.",
+                f"⚠️ Remittance already logged for {day_label}.\nUse `undo` first if you need to change it.",
                 parse_mode="Markdown",
             )
             return
         amt = format_currency(currency, data["amount"])
-        await q.edit_message_text(f"✅ Remittance logged — *{amt}*", parse_mode="Markdown")
+        paid_on_str = data.get("paid_on", str(date.today()))
+        if paid_on_str != str(date.today()):
+            day_label = date.fromisoformat(paid_on_str).strftime("%d %b %Y")
+            await q.edit_message_text(f"✅ Remittance logged for *{day_label}* — *{amt}*", parse_mode="Markdown")
+        else:
+            await q.edit_message_text(f"✅ Remittance logged — *{amt}*", parse_mode="Markdown")
 
 
 async def _save_expense(user_id: int, vehicle_id: int, data: dict) -> None:
@@ -97,18 +104,19 @@ async def _save_expense(user_id: int, vehicle_id: int, data: dict) -> None:
 
 
 async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> bool:
-    today = date.today()
+    paid_on_str = data.get("paid_on")
+    target_date = date.fromisoformat(paid_on_str) if paid_on_str else date.today()
     async with get_db() as db:
         row = await db.fetchrow(
             """INSERT INTO remittance_log (vehicle_id, amount, paid_on)
                VALUES ($1, $2, $3)
                ON CONFLICT (vehicle_id, paid_on) DO NOTHING
                RETURNING id""",
-            vehicle_id, data["amount"], today,
+            vehicle_id, data["amount"], target_date,
         )
         if not row:
             return False
-        snapshot = json.dumps({"amount": data["amount"], "paid_on": str(today)})
+        snapshot = json.dumps({"amount": data["amount"], "paid_on": str(target_date)})
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
                VALUES ($1, 'remittance', 'remittance_log', $2, $3)""",

@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import date
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from parser.nlp import parse_message
@@ -11,7 +12,7 @@ from handlers.commands import (
     cmd_undo, cmd_redo, cmd_day, cmd_today, cmd_week, cmd_month,
     cmd_clients, cmd_owed, cmd_setremit, cmd_car, cmd_rest, cmd_morning,
     cmd_fuel, cmd_help, cmd_privacy, cmd_report, cmd_edit, cmd_clear,
-    cmd_summary,
+    cmd_summary, _parse_summary_date,
 )
 from utils.formatting import snapshot_to_hint
 
@@ -184,13 +185,34 @@ async def _confirm_expense(update, ctx, parsed, currency, user_db_id):
 
 async def _confirm_remittance(update, ctx, parsed, currency, user_db_id):
     amount = parsed["amount"]
+    date_str = parsed.get("date_str")
+
+    target_date = date.today()
+    date_label = None
+    if date_str:
+        resolved = _parse_summary_date(date_str.split())
+        if not resolved:
+            await update.message.reply_text(
+                f"Couldn't understand the date `{date_str}`.\n"
+                "Try: `remit 1050 yesterday` or `remit 1050 aug 8`",
+                parse_mode="Markdown",
+            )
+            return
+        target_date = resolved
+        if target_date != date.today():
+            date_label = target_date.strftime("%d %b %Y")
 
     ctx.user_data["pending"] = json.dumps({
-        "type": "remittance", "amount": amount, "user_db_id": user_db_id,
+        "type": "remittance", "amount": amount,
+        "paid_on": str(target_date), "user_db_id": user_db_id,
     })
 
+    text = f"🏦 *Remittance paid*\n*{format_currency(currency, amount)}*"
+    if date_label:
+        text += f"\nDate: {date_label}"
+
     await update.message.reply_text(
-        f"🏦 *Remittance paid*\n*{format_currency(currency, amount)}*",
+        text,
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("✓ Save", callback_data="ct:remittance"),
             InlineKeyboardButton("✗ Cancel", callback_data="cn:remittance"),

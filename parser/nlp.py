@@ -82,7 +82,8 @@ def _fast_parse(text: str) -> dict | None:
             if m:
                 amt = _parse_amount(m.group())
                 if amt is not None:
-                    return {"type": "remittance", "amount": amt}
+                    date_str = text[em.end() + m.end():].strip() or None
+                    return {"type": "remittance", "amount": amt, "date_str": date_str}
             return None
 
         expense_type = _EXPENSE_MAP.get(kw, "OTHER")
