@@ -154,6 +154,13 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                  AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
             db_user["id"], today, cleared,
         )
+        un = await db.fetchrow(
+            """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
+               FROM trips
+               WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 0
+                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+            db_user["id"], today, cleared,
+        )
         ex = await db.fetchrow(
             """SELECT COALESCE(SUM(amount), 0) AS total
                FROM expenses
@@ -164,12 +171,16 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     gross = tr["gross"]
     trip_count = tr["cnt"]
+    owed_today = un["gross"]
+    owed_count = un["cnt"]
     costs = ex["total"]
     profit = gross - costs - remit_due
 
     day_str = datetime.now().strftime("%A %d %b").replace(" 0", " ")
     lines = [f"📊 *Today — {day_str}*\n"]
     lines.append(f"Trips: *{format_currency(currency, gross)}* ({trip_count})")
+    if owed_today > 0:
+        lines.append(f"❌ Owed today: *{format_currency(currency, owed_today)}* ({owed_count})")
     if costs > 0:
         lines.append(f"Costs: *−{format_currency(currency, costs)}*")
 
@@ -444,7 +455,7 @@ async def cmd_owed(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     for r in named:
         lines.append(f"*{r['display_name']}* · {r['cnt']} trip(s) · {format_currency(currency, r['total'])}")
         keyboard.append([InlineKeyboardButton(
-            f"✓ {r['display_name']} paid",
+            f"💳 {r['display_name']} — {format_currency(currency, r['total'])}",
             callback_data=f"paid:{r['id']}",
         )])
 
@@ -793,6 +804,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`edit` — edit one of the last 3 entries\n"
         f"`clear` — start fresh (data kept, views reset)\n"
         f"`today` — today's profit & break-even\n"
+        f"`summary yesterday` — full detail for any day\n"
         f"`rest` — mark today as a rest day (no remittance)\n"
         f"`morning on 07:00` — daily break-even push before your shift\n"
         f"`week` — weekly summary\n"
@@ -833,3 +845,171 @@ async def cmd_deleteme(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ]),
         parse_mode="Markdown",
     )
+
+
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2,
+    "mar": 3, "march": 3, "apr": 4, "april": 4,
+    "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+
+
+def _parse_summary_date(args: list) -> date | None:
+    today = date.today()
+    if not args:
+        return today
+    text = " ".join(args).lower().strip()
+    if text in ("today", ""):
+        return today
+    if text == "yesterday":
+        return today - timedelta(days=1)
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        pass
+    parts = text.split()
+    if len(parts) == 2:
+        a, b = parts
+        if a in _MONTHS and b.isdigit():
+            month, day = _MONTHS[a], int(b)
+        elif b in _MONTHS and a.isdigit():
+            month, day = _MONTHS[b], int(a)
+        else:
+            return None
+        year = today.year
+        try:
+            d = date(year, month, day)
+            return date(year - 1, month, day) if d > today else d
+        except ValueError:
+            return None
+    if len(parts) == 1 and parts[0].isdigit():
+        try:
+            return date(today.year, today.month, int(parts[0]))
+        except ValueError:
+            return None
+    return None
+
+
+async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    args = ctx.args or []
+    target = _parse_summary_date(args)
+    if target is None:
+        await update.message.reply_text(
+            "Couldn't understand the date. Try:\n"
+            "`summary yesterday`\n"
+            "`summary aug 8`\n"
+            "`summary 2026-08-08`",
+            parse_mode="Markdown",
+        )
+        return
+
+    currency = db_user["currency"]
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    cleared = db_user.get("log_cleared_at")
+
+    async with get_db() as db:
+        paid = await db.fetchrow(
+            """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
+               FROM trips WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 1
+                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+            db_user["id"], target, cleared,
+        )
+        unpaid = await db.fetchrow(
+            """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
+               FROM trips WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 0
+                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+            db_user["id"], target, cleared,
+        )
+        trip_rows = await db.fetch(
+            """SELECT t.amount, t.destination, t.paid, t.occurred_at,
+                      p.display_name AS passenger
+               FROM trips t LEFT JOIN passengers p ON p.id = t.passenger_id
+               WHERE t.user_id = $1 AND DATE(t.occurred_at) = $2
+                 AND t.occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)
+               ORDER BY t.occurred_at""",
+            db_user["id"], target, cleared,
+        )
+        fuel = await db.fetchrow(
+            """SELECT COALESCE(SUM(amount), 0) AS total, COALESCE(SUM(litres), 0) AS litres
+               FROM expenses WHERE user_id = $1 AND type = 'FUEL' AND DATE(occurred_at) = $2
+                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+            db_user["id"], target, cleared,
+        )
+        other_exp = await db.fetchrow(
+            """SELECT COALESCE(SUM(amount), 0) AS total
+               FROM expenses WHERE user_id = $1 AND type != 'FUEL' AND DATE(occurred_at) = $2
+                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+            db_user["id"], target, cleared,
+        )
+        remit_row = await db.fetchrow(
+            """SELECT amount, status FROM remittance_log
+               WHERE vehicle_id = $1 AND paid_on = $2
+                 AND ($3::timestamptz IS NULL OR created_at >= $3)""",
+            vehicle["id"] if vehicle else 0, target, cleared,
+        ) if vehicle else None
+
+    day_str = target.strftime("%A, %d %b %Y")
+    lines = [f"📋 *{day_str}*\n"]
+
+    total_trips = paid["cnt"] + unpaid["cnt"]
+    if total_trips == 0:
+        lines.append("No trips recorded this day.")
+    else:
+        lines.append(f"🚗 *Trips* ({total_trips})")
+        if paid["cnt"] > 0:
+            lines.append(f"  ✅ Paid: {paid['cnt']} — {format_currency(currency, paid['gross'])}")
+        if unpaid["cnt"] > 0:
+            lines.append(f"  ❌ Owed: {unpaid['cnt']} — {format_currency(currency, unpaid['gross'])}")
+        for t in trip_rows[:20]:
+            icon = "✅" if t["paid"] else "❌"
+            parts = [f"  {icon} {format_currency(currency, t['amount'])}"]
+            if t["destination"]:
+                parts.append(t["destination"])
+            if t["passenger"]:
+                parts.append(f"({t['passenger']})")
+            parts.append(t["occurred_at"].strftime("%H:%M"))
+            lines.append(" · ".join(parts))
+        if len(trip_rows) > 20:
+            lines.append(f"  _...and {len(trip_rows) - 20} more_")
+
+    if fuel["total"] > 0:
+        fuel_line = f"\n⛽ Fuel: {format_currency(currency, fuel['total'])}"
+        if fuel["litres"] > 0:
+            fuel_line += f" ({fuel['litres']:.0f}L)"
+        lines.append(fuel_line)
+    if other_exp["total"] > 0:
+        lines.append(f"🔧 Other costs: {format_currency(currency, other_exp['total'])}")
+
+    if remit_row:
+        status = remit_row["status"].lower()
+        if status == "paid":
+            lines.append(f"\n🏦 Remittance: ✅ {format_currency(currency, remit_row['amount'])} paid")
+        elif status == "rest":
+            lines.append("\n🏦 Remittance: 🏖️ rest day")
+    elif vehicle:
+        rate = await vehicle_svc.get_remittance_rate(vehicle["id"])
+        if rate > 0:
+            lines.append(f"\n🏦 Remittance: ⚠️ {format_currency(currency, rate)} not logged")
+
+    total_costs = fuel["total"] + other_exp["total"]
+    remit_paid = remit_row["amount"] if remit_row and remit_row["status"] == "PAID" else 0.0
+    net = paid["gross"] - total_costs - remit_paid
+
+    lines.append("\n──────────────────")
+    sign = "+" if net >= 0 else ""
+    lines.append(f"Net profit (paid): *{sign}{format_currency(currency, net)}*")
+    if unpaid["gross"] > 0:
+        incl = net + unpaid["gross"]
+        sign2 = "+" if incl >= 0 else ""
+        lines.append(f"Incl. owed: *{sign2}{format_currency(currency, incl)}*")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")

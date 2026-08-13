@@ -5,11 +5,13 @@ from telegram.ext import ContextTypes
 from parser.nlp import parse_message
 from services import users as user_svc
 from services import vehicles as vehicle_svc
+from db.database import get_db
 from utils.formatting import format_currency
 from handlers.commands import (
     cmd_undo, cmd_redo, cmd_day, cmd_today, cmd_week, cmd_month,
     cmd_clients, cmd_owed, cmd_setremit, cmd_car, cmd_rest, cmd_morning,
     cmd_fuel, cmd_help, cmd_privacy, cmd_report, cmd_edit, cmd_clear,
+    cmd_summary,
 )
 from utils.formatting import snapshot_to_hint
 
@@ -39,6 +41,7 @@ _PREFIX_CMDS = {
     "setremit": cmd_setremit,
     "morning": cmd_morning,
     "report": cmd_report,
+    "summary": cmd_summary,
 }
 
 
@@ -58,6 +61,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Too many requests — please wait a moment.")
         return
     ctx.user_data["_rl_calls"] = bucket + [now]
+
+    # Partial payment state: user tapped a client in /owed and is sending payment amount
+    if ctx.user_data.get("paying_passenger"):
+        await _handle_partial_payment(update, ctx, db_user)
+        return
 
     # Editing state: user tapped an entry and must send corrected text
     if ctx.user_data.get("editing"):
@@ -253,5 +261,84 @@ async def _handle_edit_reply(update, ctx, db_user: dict) -> None:
             InlineKeyboardButton("✓ Save", callback_data="edit_ok"),
             InlineKeyboardButton("✗ Cancel", callback_data="edit_no"),
         ]]),
+        parse_mode="Markdown",
+    )
+
+
+async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
+    text = update.message.text.strip()
+    paying = ctx.user_data["paying_passenger"]
+    currency = db_user["currency"]
+
+    if text.lower() in ("cancel", "/cancel"):
+        ctx.user_data.pop("paying_passenger", None)
+        await update.message.reply_text("Payment cancelled.")
+        return
+
+    try:
+        amount = float(text.replace(",", ""))
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Send a valid amount, or type `cancel` to exit.",
+            parse_mode="Markdown",
+        )
+        return
+
+    total = paying["total"]
+    if amount >= total:
+        await update.message.reply_text(
+            f"That covers the full balance ({format_currency(currency, total)}).\n"
+            "Tap *Pay All* in the previous message instead.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Greedily apply payment to oldest trips first (trips already sorted ASC)
+    trips = paying["trips"]  # [{"id": ..., "amount": ...}]
+    remaining = amount
+    to_pay_ids = []
+    paid_total = 0.0
+    for trip in trips:
+        if remaining >= trip["amount"]:
+            to_pay_ids.append(trip["id"])
+            paid_total += trip["amount"]
+            remaining -= trip["amount"]
+        else:
+            break
+
+    if not to_pay_ids:
+        first_amt = trips[0]["amount"]
+        await update.message.reply_text(
+            f"Amount is less than the oldest trip ({format_currency(currency, first_amt)}).\n"
+            "Send a larger amount or type `cancel`.",
+            parse_mode="Markdown",
+        )
+        return
+
+    still_owed = total - paid_total
+    passenger_id = paying["passenger_id"]
+    name = paying["name"]
+
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE trips SET paid = 1 WHERE id = ANY($1::int[]) AND user_id = $2",
+            to_pay_ids, db_user["id"],
+        )
+        await db.execute(
+            """UPDATE passengers
+               SET lifetime_revenue = lifetime_revenue + $1,
+                   trip_count = trip_count + $2
+               WHERE id = $3 AND user_id = $4""",
+            paid_total, len(to_pay_ids), passenger_id, db_user["id"],
+        )
+
+    ctx.user_data.pop("paying_passenger", None)
+
+    await update.message.reply_text(
+        f"✅ *{name}* — {len(to_pay_ids)} trip(s) marked paid\n"
+        f"Paid: *{format_currency(currency, paid_total)}*\n"
+        f"Still owed: *{format_currency(currency, still_owed)}*",
         parse_mode="Markdown",
     )

@@ -1,7 +1,7 @@
 import io
 import json
 from datetime import date
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services import users as user_svc
 from services import vehicles as vehicle_svc
@@ -119,6 +119,7 @@ async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> bool:
 
 
 async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show unpaid trip breakdown for a client and offer Pay All or partial payment."""
     q = update.callback_query
     await q.answer()
     passenger_id = int(q.data.split(":", 1)[1])
@@ -127,12 +128,66 @@ async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     currency = db_user["currency"]
 
     async with get_db() as db:
+        trips = await db.fetch(
+            """SELECT id, amount, destination, occurred_at
+               FROM trips WHERE passenger_id = $1 AND paid = 0 AND user_id = $2
+               ORDER BY occurred_at ASC""",
+            passenger_id, db_user["id"],
+        )
+        p = await db.fetchrow(
+            "SELECT display_name FROM passengers WHERE id = $1 AND user_id = $2",
+            passenger_id, db_user["id"],
+        )
+
+    if not trips or not p:
+        await q.edit_message_text("No unpaid trips found for this client.")
+        return
+
+    name = p["display_name"]
+    total = sum(float(t["amount"]) for t in trips)
+    lines = [f"💳 *{name}* owes {format_currency(currency, total)}\n"]
+    for t in trips:
+        dest = f" · {t['destination']}" if t["destination"] else ""
+        lines.append(f"• {format_currency(currency, t['amount'])}{dest} — {t['occurred_at'].strftime('%d %b %H:%M')}")
+    lines.append("\n_Type an amount to log a partial payment, or tap Pay All._")
+
+    ctx.user_data["paying_passenger"] = {
+        "passenger_id": passenger_id,
+        "name": name,
+        "total": total,
+        "trips": [{"id": t["id"], "amount": float(t["amount"])} for t in trips],
+    }
+
+    await q.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                f"✓ Pay All ({format_currency(currency, total)})",
+                callback_data=f"payall:{passenger_id}",
+            ),
+            InlineKeyboardButton("✗ Cancel", callback_data="cn:owed"),
+        ]]),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_pay_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mark all unpaid trips for a passenger as paid."""
+    q = update.callback_query
+    await q.answer()
+    passenger_id = int(q.data.split(":", 1)[1])
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    currency = db_user["currency"]
+    ctx.user_data.pop("paying_passenger", None)
+
+    async with get_db() as db:
         paid_rows = await db.fetch(
             "UPDATE trips SET paid = 1 WHERE passenger_id = $1 AND paid = 0 AND user_id = $2 RETURNING amount",
             passenger_id, db_user["id"],
         )
         if not paid_rows:
-            await q.edit_message_text("No unpaid trips found for this client.")
+            await q.edit_message_text("No unpaid trips found.")
             return
         total = sum(float(r["amount"]) for r in paid_rows)
         cnt = len(paid_rows)
@@ -148,9 +203,8 @@ async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         )
 
     name = p["display_name"] if p else "Client"
-    amt = format_currency(currency, total)
     await q.edit_message_text(
-        f"✅ *{name}* marked as paid — {amt} settled.",
+        f"✅ *{name}* fully paid — {format_currency(currency, total)} settled ({cnt} trip(s)).",
         parse_mode="Markdown",
     )
 
@@ -159,6 +213,7 @@ async def handle_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
     ctx.user_data.pop("pending", None)
+    ctx.user_data.pop("paying_passenger", None)
     await q.edit_message_text("Cancelled.")
 
 
