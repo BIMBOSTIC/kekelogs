@@ -99,27 +99,43 @@ async def undo_last_action(user_id: int) -> dict | None:
             user_id, log["action_type"], log["table_name"], log["snapshot"],
         )
 
-        sql = _DELETE_SQL.get(log["table_name"])
-        if sql is None:
-            _logger.error("Illegal table_name %r in action_log id=%s", log["table_name"], log["id"])
-            raise ValueError(f"Illegal table_name: {log['table_name']!r}")
-        await db.execute(sql, log["record_id"])
-
-        if log["action_type"] == "trip":
-            pname = snapshot.get("passenger_name")
-            if pname and snapshot.get("paid"):
-                p = await db.fetchrow(
-                    "SELECT id FROM passengers WHERE user_id = $1 AND LOWER(display_name) = $2",
-                    user_id, pname.lower(),
+        if log["action_type"] == "mark_paid":
+            trip_ids = snapshot.get("trip_ids", [])
+            paid_total = snapshot.get("paid_total", 0.0)
+            trip_count_val = snapshot.get("trip_count", 0)
+            passenger_id = snapshot.get("passenger_id")
+            if trip_ids:
+                await db.execute("UPDATE trips SET paid = 0 WHERE id = ANY($1::int[])", trip_ids)
+            if passenger_id and paid_total:
+                await db.execute(
+                    """UPDATE passengers
+                       SET lifetime_revenue = GREATEST(0, lifetime_revenue - $1),
+                           trip_count = GREATEST(0, trip_count - $2)
+                       WHERE id = $3""",
+                    paid_total, trip_count_val, passenger_id,
                 )
-                if p:
-                    await db.execute(
-                        """UPDATE passengers
-                           SET lifetime_revenue = GREATEST(0, lifetime_revenue - $1),
-                               trip_count = GREATEST(0, trip_count - 1)
-                           WHERE id = $2""",
-                        snapshot["amount"], p["id"],
+        else:
+            sql = _DELETE_SQL.get(log["table_name"])
+            if sql is None:
+                _logger.error("Illegal table_name %r in action_log id=%s", log["table_name"], log["id"])
+                raise ValueError(f"Illegal table_name: {log['table_name']!r}")
+            await db.execute(sql, log["record_id"])
+
+            if log["action_type"] == "trip":
+                pname = snapshot.get("passenger_name")
+                if pname and snapshot.get("paid"):
+                    p = await db.fetchrow(
+                        "SELECT id FROM passengers WHERE user_id = $1 AND LOWER(display_name) = $2",
+                        user_id, pname.lower(),
                     )
+                    if p:
+                        await db.execute(
+                            """UPDATE passengers
+                               SET lifetime_revenue = GREATEST(0, lifetime_revenue - $1),
+                                   trip_count = GREATEST(0, trip_count - 1)
+                               WHERE id = $2""",
+                            snapshot["amount"], p["id"],
+                        )
 
         await db.execute("DELETE FROM action_log WHERE id = $1", log["id"])
         return {"action_type": log["action_type"], "snapshot": snapshot}
@@ -181,10 +197,34 @@ async def redo_last_action(user_id: int, vehicle_id: int) -> dict | None:
             paid_on = date.fromisoformat(paid_on_raw) if isinstance(paid_on_raw, str) else paid_on_raw
             row = await db.fetchrow(
                 """INSERT INTO remittance_log (vehicle_id, amount, paid_on, status)
-                   VALUES ($1, $2, $3, $4) RETURNING id""",
+                   VALUES ($1, $2, $3, $4)
+                   ON CONFLICT (vehicle_id, paid_on) DO NOTHING
+                   RETURNING id""",
                 vehicle_id, snapshot.get("amount", 0), paid_on, status,
             )
-            new_id = row["id"]
+            if row:
+                new_id = row["id"]
+
+        elif action_type == "mark_paid":
+            trip_ids = snapshot.get("trip_ids", [])
+            paid_total = snapshot.get("paid_total", 0.0)
+            trip_count_val = snapshot.get("trip_count", 0)
+            passenger_id = snapshot.get("passenger_id")
+            if trip_ids:
+                await db.execute("UPDATE trips SET paid = 1 WHERE id = ANY($1::int[])", trip_ids)
+            if passenger_id and paid_total:
+                await db.execute(
+                    """UPDATE passengers
+                       SET lifetime_revenue = lifetime_revenue + $1,
+                           trip_count = trip_count + $2
+                       WHERE id = $3""",
+                    paid_total, trip_count_val, passenger_id,
+                )
+            await db.execute(
+                """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
+                   VALUES ($1, 'mark_paid', 'trips', 0, $2)""",
+                user_id, log["snapshot"],
+            )
 
         if new_id:
             await db.execute(

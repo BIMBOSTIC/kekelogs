@@ -32,6 +32,7 @@ _LITRES = re.compile(r"(\d+(?:\.\d+)?)\s*l(?:itres?|iters?)?$", re.IGNORECASE)
 _ODOMETER = re.compile(r"(\d+(?:\.\d+)?)\s*km\b", re.IGNORECASE)
 _UNPAID = re.compile(r"\b(unpaid|credit|owe|owed)\b", re.IGNORECASE)
 _TRANSFER = re.compile(r"\b(transfer|bank)\b", re.IGNORECASE)
+_DATE_ON = re.compile(r"(?:^|\s+)on\s+(\S+(?:\s+\S+)?)\s*$", re.IGNORECASE)
 
 _EXPENSE_MAP = {
     "fuel": "FUEL", "petrol": "FUEL", "gas": "FUEL",
@@ -130,6 +131,12 @@ def _fast_parse(text: str) -> dict | None:
         remainder = am.group(2).strip()
         paid = True
         payment_method = "CASH"
+        date_str = None
+
+        dom = _DATE_ON.search(remainder)
+        if dom:
+            date_str = dom.group(1).strip()
+            remainder = remainder[:dom.start()].strip()
 
         if _UNPAID.search(remainder):
             paid = False
@@ -150,6 +157,7 @@ def _fast_parse(text: str) -> dict | None:
             "passenger": passenger,
             "paid": paid,
             "payment_method": payment_method,
+            "date_str": date_str,
         }
 
     return None

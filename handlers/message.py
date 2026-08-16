@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import date
+from datetime import date, datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from parser.nlp import parse_message
@@ -15,6 +15,7 @@ from handlers.commands import (
     cmd_summary, _parse_summary_date,
 )
 from utils.formatting import snapshot_to_hint
+from services.trips import clear_redo_stack
 
 _PARSE_RATE_LIMIT = 10  # max parse_message calls per user per 60 seconds
 
@@ -124,8 +125,19 @@ async def _confirm_trip(update, ctx, parsed, currency, user_db_id):
     passenger = parsed.get("passenger")
     paid = parsed.get("paid", True)
     method = parsed.get("payment_method", "CASH")
+    date_str = parsed.get("date_str")
+
+    occurred_at_iso = None
+    date_label = None
+    if date_str:
+        resolved = _parse_summary_date(date_str.split())
+        if resolved and resolved != date.today():
+            occurred_at_iso = datetime(resolved.year, resolved.month, resolved.day, 12, 0).isoformat()
+            date_label = resolved.strftime("%d %b %Y")
 
     lines = [f"*{format_currency(currency, amount)}*"]
+    if date_label:
+        lines.append(f"Date: {date_label}")
     if destination:
         lines.append(f"To: {destination}")
     if passenger:
@@ -138,6 +150,7 @@ async def _confirm_trip(update, ctx, parsed, currency, user_db_id):
         "destination": destination, "passenger": passenger,
         "paid": paid, "payment_method": method,
         "user_db_id": user_db_id,
+        "occurred_at": occurred_at_iso,
     })
 
     await update.message.reply_text(
@@ -355,8 +368,18 @@ async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
                WHERE id = $3 AND user_id = $4""",
             paid_total, len(to_pay_ids), passenger_id, db_user["id"],
         )
+        snapshot = json.dumps({
+            "passenger_id": passenger_id, "name": name,
+            "trip_ids": to_pay_ids, "paid_total": paid_total, "trip_count": len(to_pay_ids),
+        })
+        await db.execute(
+            """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
+               VALUES ($1, 'mark_paid', 'trips', 0, $2)""",
+            db_user["id"], snapshot,
+        )
 
     ctx.user_data.pop("paying_passenger", None)
+    await clear_redo_stack(db_user["id"])
 
     if still_owed > 0:
         await update.message.reply_text(

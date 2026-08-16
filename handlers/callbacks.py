@@ -1,6 +1,6 @@
 import io
 import json
-from datetime import date
+from datetime import date, datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services import users as user_svc
@@ -37,6 +37,7 @@ async def handle_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if entry_type == "trip":
+        occ = datetime.fromisoformat(data["occurred_at"]) if data.get("occurred_at") else None
         await save_trip(
             user_id=db_user["id"],
             vehicle_id=vehicle["id"],
@@ -45,12 +46,14 @@ async def handle_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             passenger_name=data.get("passenger"),
             paid=data.get("paid", True),
             payment_method=data.get("payment_method", "CASH"),
+            occurred_at=occ,
         )
         amt = format_currency(currency, data["amount"])
         parts = [p for p in [data.get("destination"), data.get("passenger")] if p]
         detail = " · ".join(parts)
+        date_note = f"\n📅 {occ.strftime('%d %b %Y')}" if occ else ""
         await q.edit_message_text(
-            f"✅ Trip saved — *{amt}*" + (f"\n{detail}" if detail else ""),
+            f"✅ Trip saved — *{amt}*" + (f"\n{detail}" if detail else "") + date_note,
             parse_mode="Markdown",
         )
 
@@ -191,12 +194,13 @@ async def handle_pay_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     async with get_db() as db:
         paid_rows = await db.fetch(
-            "UPDATE trips SET paid = 1 WHERE passenger_id = $1 AND paid = 0 AND user_id = $2 RETURNING amount",
+            "UPDATE trips SET paid = 1 WHERE passenger_id = $1 AND paid = 0 AND user_id = $2 RETURNING id, amount",
             passenger_id, db_user["id"],
         )
         if not paid_rows:
             await q.edit_message_text("No unpaid trips found.")
             return
+        trip_ids = [r["id"] for r in paid_rows]
         total = sum(float(r["amount"]) for r in paid_rows)
         cnt = len(paid_rows)
         await db.execute(
@@ -209,8 +213,18 @@ async def handle_pay_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             "SELECT display_name FROM passengers WHERE id = $1 AND user_id = $2",
             passenger_id, db_user["id"],
         )
+        name = p["display_name"] if p else "Client"
+        snapshot = json.dumps({
+            "passenger_id": passenger_id, "name": name,
+            "trip_ids": trip_ids, "paid_total": total, "trip_count": cnt,
+        })
+        await db.execute(
+            """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
+               VALUES ($1, 'mark_paid', 'trips', 0, $2)""",
+            db_user["id"], snapshot,
+        )
 
-    name = p["display_name"] if p else "Client"
+    await clear_redo_stack(db_user["id"])
     await q.edit_message_text(
         f"✅ *{name}* fully paid — {format_currency(currency, total)} settled ({cnt} trip(s)).",
         parse_mode="Markdown",
