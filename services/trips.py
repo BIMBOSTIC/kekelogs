@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from db.database import get_db
 
 _logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ async def save_trip(
     payment_method: str = "CASH",
     occurred_at: datetime | None = None,
 ) -> int:
-    ts = occurred_at or datetime.now()
+    ts = occurred_at or datetime.now(timezone.utc)
 
     async with get_db() as db:
         passenger_id = None
@@ -75,7 +75,8 @@ async def save_trip(
                 amount, passenger_id,
             )
 
-    await clear_redo_stack(user_id)
+        await db.execute("DELETE FROM redo_log WHERE user_id = $1", user_id)
+
     return trip_id
 
 
@@ -157,7 +158,7 @@ async def redo_last_action(user_id: int, vehicle_id: int) -> dict | None:
 
         if action_type == "trip":
             occurred_at = datetime.fromisoformat(
-                snapshot.get("occurred_at", datetime.now().isoformat())
+                snapshot.get("occurred_at", datetime.now(timezone.utc).isoformat())
             )
             passenger_id = None
             if snapshot.get("passenger_name"):

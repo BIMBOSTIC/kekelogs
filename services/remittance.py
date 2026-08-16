@@ -1,7 +1,6 @@
 import json
 from datetime import date
 from db.database import get_db
-from services.trips import clear_redo_stack
 
 
 async def get_today_status(vehicle_id: int, cleared_at=None) -> dict:
@@ -99,5 +98,5 @@ async def mark_rest_day(vehicle_id: int, user_id: int) -> bool:
             user_id, row["id"],
             json.dumps({"amount": 0, "status": "REST", "paid_on": str(today)}),
         )
-    await clear_redo_stack(user_id)
+        await db.execute("DELETE FROM redo_log WHERE user_id = $1", user_id)
     return True

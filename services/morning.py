@@ -2,8 +2,10 @@ import logging
 import statistics
 import pytz
 from datetime import datetime, time
+from telegram.error import Forbidden
 from telegram.ext import Application
 from db.database import get_db
+from services import users as user_svc
 from utils.formatting import format_currency
 
 _logger = logging.getLogger(__name__)
@@ -36,26 +38,33 @@ async def compute_breakeven(user_id: int, vehicle_id: int) -> dict:
 async def _send_morning_push(context) -> None:
     job = context.job
     d = job.data
-    data = await compute_breakeven(d["user_db_id"], d["vehicle_id"])
-    currency = d["currency"]
+    try:
+        data = await compute_breakeven(d["user_db_id"], d["vehicle_id"])
+        currency = d["currency"]
 
-    lines = ["🌅 *Good morning!*\n\nToday's target:"]
-    if data["remit"] > 0:
-        lines.append(f"• Remittance: *{format_currency(currency, data['remit'])}*")
-    if data["median_fuel"] > 0:
-        lines.append(f"• Fuel (14-day avg): *~{format_currency(currency, data['median_fuel'])}*")
-        lines.append(f"• Break-even: *{format_currency(currency, data['breakeven'])}*")
-    elif data["remit"] > 0:
-        lines.append(f"• Break-even: *{format_currency(currency, data['remit'])}*")
-        lines.append("_Log `fuel 2000 32l` a few times to get a fuel estimate._")
+        lines = ["🌅 *Good morning!*\n\nToday's target:"]
+        if data["remit"] > 0:
+            lines.append(f"• Remittance: *{format_currency(currency, data['remit'])}*")
+        if data["median_fuel"] > 0:
+            lines.append(f"• Fuel (14-day avg): *~{format_currency(currency, data['median_fuel'])}*")
+            lines.append(f"• Break-even: *{format_currency(currency, data['breakeven'])}*")
+        elif data["remit"] > 0:
+            lines.append(f"• Break-even: *{format_currency(currency, data['remit'])}*")
+            lines.append("_Log `fuel 2000 32l` a few times to get a fuel estimate._")
 
-    lines.append("\nGood luck out there 🚗")
+        lines.append("\nGood luck out there 🚗")
 
-    await context.bot.send_message(
-        chat_id=d["telegram_id"],
-        text="\n".join(lines),
-        parse_mode="Markdown",
-    )
+        await context.bot.send_message(
+            chat_id=d["telegram_id"],
+            text="\n".join(lines),
+            parse_mode="Markdown",
+        )
+    except Forbidden:
+        _logger.warning("User %s blocked the bot — disabling morning push", d["telegram_id"])
+        job.schedule_removal()
+        await user_svc.update_user(d["telegram_id"], morning_push=0)
+    except Exception:
+        _logger.error("Morning push failed for user %s", d["telegram_id"], exc_info=True)
 
 
 def _parse_push_time(time_str: str, tz) -> time:

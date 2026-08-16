@@ -99,15 +99,16 @@ def _fast_parse(text: str) -> dict | None:
         tail = remainder[am.end():].strip()
         litres = odometer = note = None
 
+        # Extract odometer first (unanchored) so its removal leaves litres at tail end
+        om = _ODOMETER.search(tail)
+        if om:
+            odometer = float(om.group(1))
+            tail = (tail[:om.start()] + tail[om.end():]).strip()
+
         lm = _LITRES.search(tail)
         if lm:
             litres = float(lm.group(1))
             tail = tail[: lm.start()].strip()
-
-        om = _ODOMETER.search(tail)
-        if om:
-            odometer = float(om.group(1))
-            tail = tail[: om.start()].strip()
 
         if tail:
             note = tail

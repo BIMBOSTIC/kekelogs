@@ -15,7 +15,6 @@ from handlers.commands import (
     cmd_summary, _parse_summary_date,
 )
 from utils.formatting import snapshot_to_hint
-from services.trips import clear_redo_stack
 
 _PARSE_RATE_LIMIT = 10  # max parse_message calls per user per 60 seconds
 
@@ -56,18 +55,18 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Please set up your account first with /start")
         return
 
-    # Rate-limit parse_message calls (applies to both edit replies and free text)
+    # Partial payment: just a number, no NLP — exempt from rate limit
+    if ctx.user_data.get("paying_passenger"):
+        await _handle_partial_payment(update, ctx, db_user)
+        return
+
+    # Rate-limit parse_message calls (edit replies and free text both call the NLP parser)
     now = time.monotonic()
     bucket = [t for t in ctx.user_data.get("_rl_calls", []) if now - t < 60]
     if len(bucket) >= _PARSE_RATE_LIMIT:
         await update.message.reply_text("Too many requests — please wait a moment.")
         return
     ctx.user_data["_rl_calls"] = bucket + [now]
-
-    # Partial payment state: user tapped a client in /owed and is sending payment amount
-    if ctx.user_data.get("paying_passenger"):
-        await _handle_partial_payment(update, ctx, db_user)
-        return
 
     # Editing state: user tapped an entry and must send corrected text
     if ctx.user_data.get("editing"):
@@ -377,9 +376,9 @@ async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
                VALUES ($1, 'mark_paid', 'trips', 0, $2)""",
             db_user["id"], snapshot,
         )
+        await db.execute("DELETE FROM redo_log WHERE user_id = $1", db_user["id"])
 
     ctx.user_data.pop("paying_passenger", None)
-    await clear_redo_stack(db_user["id"])
 
     if still_owed > 0:
         await update.message.reply_text(

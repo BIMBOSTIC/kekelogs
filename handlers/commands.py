@@ -299,14 +299,16 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         trip_rows = await db.fetch(
             """SELECT DATE(occurred_at) AS day, COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
                FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2 AND paid = 1
+                 AND ($3::timestamptz IS NULL OR occurred_at >= $3)
                GROUP BY DATE(occurred_at)""",
-            db_user["id"], effective_start,
+            db_user["id"], effective_start, cleared,
         )
         expense_rows = await db.fetch(
             """SELECT DATE(occurred_at) AS day, COALESCE(SUM(amount), 0) AS costs
                FROM expenses WHERE user_id = $1 AND DATE(occurred_at) >= $2
+                 AND ($3::timestamptz IS NULL OR occurred_at >= $3)
                GROUP BY DATE(occurred_at)""",
-            db_user["id"], effective_start,
+            db_user["id"], effective_start, cleared,
         )
         remit_rows = await db.fetch(
             "SELECT paid_on AS day, status FROM remittance_log WHERE vehicle_id = $1 AND paid_on >= $2",
@@ -380,14 +382,16 @@ async def cmd_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         tr = await db.fetchrow(
             """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS trips,
                       COUNT(DISTINCT DATE(occurred_at)) AS days
-               FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2 AND paid = 1""",
-            db_user["id"], effective_start,
+               FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2 AND paid = 1
+                 AND ($3::timestamptz IS NULL OR occurred_at >= $3)""",
+            db_user["id"], effective_start, cleared,
         )
         ex_rows = await db.fetch(
             """SELECT type, COALESCE(SUM(amount), 0) AS total
                FROM expenses WHERE user_id = $1 AND DATE(occurred_at) >= $2
+                 AND ($3::timestamptz IS NULL OR occurred_at >= $3)
                GROUP BY type ORDER BY total DESC""",
-            db_user["id"], effective_start,
+            db_user["id"], effective_start, cleared,
         )
         remit = await db.fetchrow(
             """SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS days_paid

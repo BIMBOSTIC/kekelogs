@@ -6,8 +6,7 @@ from telegram.ext import ContextTypes
 from services import users as user_svc
 from services import vehicles as vehicle_svc
 from services.trips import (
-    save_trip, clear_redo_stack,
-    update_trip, update_expense, update_remittance_entry,
+    save_trip, update_trip, update_expense, update_remittance_entry,
 )
 from services.report import build_report, _PERIOD_LABELS
 from db.database import get_db
@@ -29,6 +28,9 @@ async def handle_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     ctx.user_data.pop("pending", None)
 
     db_user = await user_svc.get_user(uid)
+    if not db_user:
+        await q.edit_message_text("Session expired. Please run /start.")
+        return
     currency = db_user["currency"]
     vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
 
@@ -103,7 +105,7 @@ async def _save_expense(user_id: int, vehicle_id: int, data: dict) -> None:
                VALUES ($1, 'expense', 'expenses', $2, $3)""",
             user_id, row["id"], snapshot,
         )
-    await clear_redo_stack(user_id)
+        await db.execute("DELETE FROM redo_log WHERE user_id = $1", user_id)
 
 
 async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> bool:
@@ -119,13 +121,13 @@ async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> bool:
         )
         if not row:
             return False
-        snapshot = json.dumps({"amount": data["amount"], "paid_on": str(target_date)})
+        snapshot = json.dumps({"amount": data["amount"], "paid_on": str(target_date), "status": "PAID"})
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
                VALUES ($1, 'remittance', 'remittance_log', $2, $3)""",
             user_id, row["id"], snapshot,
         )
-    await clear_redo_stack(user_id)
+        await db.execute("DELETE FROM redo_log WHERE user_id = $1", user_id)
     return True
 
 
@@ -133,9 +135,16 @@ async def handle_mark_paid(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     """Show unpaid trip breakdown for a client and offer Pay All or partial payment."""
     q = update.callback_query
     await q.answer()
-    passenger_id = int(q.data.split(":", 1)[1])
+    try:
+        passenger_id = int(q.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await q.edit_message_text("Invalid request.")
+        return
     uid = update.effective_user.id
     db_user = await user_svc.get_user(uid)
+    if not db_user:
+        await q.edit_message_text("Session expired. Please run /start.")
+        return
     currency = db_user["currency"]
 
     async with get_db() as db:
@@ -186,9 +195,16 @@ async def handle_pay_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     """Mark all unpaid trips for a passenger as paid."""
     q = update.callback_query
     await q.answer()
-    passenger_id = int(q.data.split(":", 1)[1])
+    try:
+        passenger_id = int(q.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await q.edit_message_text("Invalid request.")
+        return
     uid = update.effective_user.id
     db_user = await user_svc.get_user(uid)
+    if not db_user:
+        await q.edit_message_text("Session expired. Please run /start.")
+        return
     currency = db_user["currency"]
     ctx.user_data.pop("paying_passenger", None)
 
@@ -223,8 +239,8 @@ async def handle_pay_all(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
                VALUES ($1, 'mark_paid', 'trips', 0, $2)""",
             db_user["id"], snapshot,
         )
+        await db.execute("DELETE FROM redo_log WHERE user_id = $1", db_user["id"])
 
-    await clear_redo_stack(db_user["id"])
     await q.edit_message_text(
         f"✅ *{name}* fully paid — {format_currency(currency, total)} settled ({cnt} trip(s)).",
         parse_mode="Markdown",
@@ -278,7 +294,11 @@ async def handle_report_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 async def handle_edit_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
-    log_id = int(q.data.split(":", 1)[1])
+    try:
+        log_id = int(q.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await q.edit_message_text("Invalid request.")
+        return
     uid = update.effective_user.id
     db_user = await user_svc.get_user(uid)
 
