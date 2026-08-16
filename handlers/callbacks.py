@@ -108,8 +108,8 @@ async def _save_remittance(user_id: int, vehicle_id: int, data: dict) -> bool:
     target_date = date.fromisoformat(paid_on_str) if paid_on_str else date.today()
     async with get_db() as db:
         row = await db.fetchrow(
-            """INSERT INTO remittance_log (vehicle_id, amount, paid_on)
-               VALUES ($1, $2, $3)
+            """INSERT INTO remittance_log (vehicle_id, amount, paid_on, status)
+               VALUES ($1, $2, $3, 'PAID')
                ON CONFLICT (vehicle_id, paid_on) DO NOTHING
                RETURNING id""",
             vehicle_id, data["amount"], target_date,

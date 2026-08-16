@@ -1,15 +1,18 @@
 import io
 import json
+import logging
 from datetime import date, datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services import users as user_svc
 from services import vehicles as vehicle_svc
 from services.trips import undo_last_action, redo_last_action, save_trip
-from services.remittance import get_today_status, get_owing_balance, mark_rest_day
+from services.remittance import mark_rest_day
 from services.report import build_report, _PERIOD_LABELS
 from db.database import get_db
 from utils.formatting import format_currency, format_log_label
+
+_logger = logging.getLogger(__name__)
 
 
 async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -140,47 +143,95 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     today = date.today()
     currency = db_user["currency"]
     vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
-
     cleared = db_user.get("log_cleared_at")
-    remit_info = await get_today_status(vehicle["id"], cleared_at=cleared) if vehicle else {"status": "na", "amount": 0.0}
-    remit_due = remit_info["amount"] if remit_info["status"] not in ("na", "rest") else 0.0
-    owing_balance = await get_owing_balance(vehicle["id"], cleared_at=cleared) if vehicle else 0.0
 
-    async with get_db() as db:
-        tr = await db.fetchrow(
-            """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
-               FROM trips
-               WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 1
-                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
-            db_user["id"], today, cleared,
-        )
-        un = await db.fetchrow(
-            """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
-               FROM trips
-               WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 0
-                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
-            db_user["id"], today, cleared,
-        )
-        ex = await db.fetchrow(
-            """SELECT COALESCE(SUM(amount), 0) AS total
-               FROM expenses
-               WHERE user_id = $1 AND DATE(occurred_at) = $2
-                 AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
-            db_user["id"], today, cleared,
-        )
+    try:
+        async with get_db() as db:
+            remit_rate = 0.0
+            remit_info = {"status": "na", "amount": 0.0}
+            owing_balance = 0.0
+
+            if vehicle:
+                rate_row = await db.fetchrow(
+                    """SELECT amount FROM remittance_rules
+                       WHERE vehicle_id = $1 AND effective_to IS NULL
+                       ORDER BY effective_from DESC LIMIT 1""",
+                    vehicle["id"],
+                )
+                remit_rate = rate_row["amount"] if rate_row else 0.0
+
+                if remit_rate > 0:
+                    remit_row = await db.fetchrow(
+                        """SELECT status, amount FROM remittance_log
+                           WHERE vehicle_id = $1 AND paid_on = $2
+                             AND ($3::timestamptz IS NULL OR created_at >= $3)""",
+                        vehicle["id"], today, cleared,
+                    )
+                    if remit_row:
+                        remit_info = {"status": remit_row["status"].lower(), "amount": remit_row["amount"]}
+                    else:
+                        remit_info = {"status": "owing", "amount": remit_rate}
+
+                    v_start = vehicle["created_at"].date()
+                    clear_date = cleared.date() if cleared else None
+                    ow_start = max(v_start, clear_date) if clear_date else v_start
+                    if ow_start < today:
+                        ow_count = await db.fetchval(
+                            """SELECT COUNT(*)
+                               FROM generate_series($1::date, ($2::date - INTERVAL '1 day')::date, '1 day') AS d(day)
+                               LEFT JOIN remittance_log rl
+                                 ON rl.vehicle_id = $3 AND rl.paid_on = d.day
+                                 AND rl.status IN ('PAID', 'REST')
+                                 AND ($4::timestamptz IS NULL OR rl.created_at >= $4)
+                               WHERE rl.id IS NULL""",
+                            ow_start, today, vehicle["id"], cleared,
+                        )
+                        owing_balance = float(ow_count or 0) * remit_rate
+
+            tr = await db.fetchrow(
+                """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
+                   FROM trips
+                   WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 1
+                     AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+                db_user["id"], today, cleared,
+            )
+            un = await db.fetchrow(
+                """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
+                   FROM trips
+                   WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 0
+                     AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+                db_user["id"], today, cleared,
+            )
+            ex = await db.fetchrow(
+                """SELECT COALESCE(SUM(amount), 0) AS total
+                   FROM expenses
+                   WHERE user_id = $1 AND DATE(occurred_at) = $2
+                     AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
+                db_user["id"], today, cleared,
+            )
+    except Exception:
+        _logger.error("cmd_today DB error for user %s", uid, exc_info=True)
+        await update.message.reply_text("Couldn't load today's data — please try again in a moment.")
+        return
 
     gross = tr["gross"]
-    trip_count = tr["cnt"]
+    paid_count = tr["cnt"]
     owed_today = un["gross"]
     owed_count = un["cnt"]
     costs = ex["total"]
+    remit_due = remit_info["amount"] if remit_info["status"] not in ("na", "rest") else 0.0
     profit = gross - costs - remit_due
 
     day_str = datetime.now().strftime("%A %d %b").replace(" 0", " ")
     lines = [f"📊 *Today — {day_str}*\n"]
-    lines.append(f"Trips: *{format_currency(currency, gross)}* ({trip_count})")
+
+    trip_note = f"{paid_count} paid"
+    if owed_count:
+        trip_note += f", {owed_count} owed"
+    lines.append(f"Trips: *{format_currency(currency, gross)}* ({trip_note})")
+
     if owed_today > 0:
-        lines.append(f"❌ Owed today: *{format_currency(currency, owed_today)}* ({owed_count})")
+        lines.append(f"❌ Owed today: *{format_currency(currency, owed_today)}*")
     if costs > 0:
         lines.append(f"Costs: *−{format_currency(currency, costs)}*")
 
@@ -916,18 +967,25 @@ async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
     cleared = db_user.get("log_cleared_at")
 
+    # For an explicit historical date query, don't apply the clear filter if the
+    # target day predates the clear — the user wants to see that day's actual data.
+    if cleared and target < cleared.date():
+        effective_cleared = None
+    else:
+        effective_cleared = cleared
+
     async with get_db() as db:
         paid = await db.fetchrow(
             """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
                FROM trips WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 1
                  AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
-            db_user["id"], target, cleared,
+            db_user["id"], target, effective_cleared,
         )
         unpaid = await db.fetchrow(
             """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
                FROM trips WHERE user_id = $1 AND DATE(occurred_at) = $2 AND paid = 0
                  AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
-            db_user["id"], target, cleared,
+            db_user["id"], target, effective_cleared,
         )
         trip_rows = await db.fetch(
             """SELECT t.amount, t.destination, t.paid, t.occurred_at,
@@ -936,25 +994,24 @@ async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                WHERE t.user_id = $1 AND DATE(t.occurred_at) = $2
                  AND t.occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)
                ORDER BY t.occurred_at""",
-            db_user["id"], target, cleared,
+            db_user["id"], target, effective_cleared,
         )
         fuel = await db.fetchrow(
             """SELECT COALESCE(SUM(amount), 0) AS total, COALESCE(SUM(litres), 0) AS litres
                FROM expenses WHERE user_id = $1 AND type = 'FUEL' AND DATE(occurred_at) = $2
                  AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
-            db_user["id"], target, cleared,
+            db_user["id"], target, effective_cleared,
         )
         other_exp = await db.fetchrow(
             """SELECT COALESCE(SUM(amount), 0) AS total
                FROM expenses WHERE user_id = $1 AND type != 'FUEL' AND DATE(occurred_at) = $2
                  AND occurred_at >= COALESCE($3, '2000-01-01'::timestamptz)""",
-            db_user["id"], target, cleared,
+            db_user["id"], target, effective_cleared,
         )
         remit_row = await db.fetchrow(
             """SELECT amount, status FROM remittance_log
-               WHERE vehicle_id = $1 AND paid_on = $2
-                 AND ($3::timestamptz IS NULL OR created_at >= $3)""",
-            vehicle["id"] if vehicle else 0, target, cleared,
+               WHERE vehicle_id = $1 AND paid_on = $2""",
+            vehicle["id"] if vehicle else 0, target,
         ) if vehicle else None
 
     day_str = target.strftime("%A, %d %b %Y")

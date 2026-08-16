@@ -7,6 +7,10 @@ import asyncio
 import sys
 import os
 
+# Force UTF-8 output on Windows terminals that default to cp1252
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
@@ -57,7 +61,7 @@ async def cleanup():
 # ── test groups ───────────────────────────────────────────────────────────────
 
 async def test_parser():
-    print("\n── Parser ─────────────────────────────")
+    print("\n-- Parser ----------------------------------")
 
     r = _fast_parse("450")
     ok("bare number → trip",         r and r["type"] == "trip" and r["amount"] == 450)
@@ -97,7 +101,7 @@ async def test_parser():
 
 
 async def test_users_vehicles():
-    print("\n── Users & Vehicles ────────────────────")
+    print("\n-- Users & Vehicles ------------------------")
 
     await user_svc.create_user(TEST_TG_ID, "test_driver")
     u = await user_svc.get_user(TEST_TG_ID)
@@ -126,7 +130,7 @@ async def test_users_vehicles():
 
 
 async def test_trips(u, v):
-    print("\n── Trip Logging ────────────────────────")
+    print("\n-- Trip Logging ----------------------------")
 
     tid1 = await save_trip(u["id"], v["id"], 450.0)
     ok("bare trip saved",            tid1 > 0)
@@ -158,7 +162,7 @@ async def test_trips(u, v):
 
 
 async def test_expenses(u, v):
-    print("\n── Expenses ────────────────────────────")
+    print("\n-- Expenses --------------------------------")
 
     async with get_db() as db:
         r = await db.fetchrow(
@@ -186,7 +190,7 @@ async def test_expenses(u, v):
 
 
 async def test_remittance(u, v):
-    print("\n── Remittance Engine ───────────────────")
+    print("\n-- Remittance Engine -----------------------")
 
     # Nothing paid yet → owing
     s = await get_today_status(v["id"])
@@ -231,7 +235,7 @@ async def test_remittance(u, v):
 
 
 async def test_views(u, v):
-    print("\n── View Queries ────────────────────────")
+    print("\n-- View Queries ----------------------------")
     today = date.today()
     week_start = today - timedelta(days=6)
     month_start = date(today.year, today.month, 1)
@@ -275,7 +279,7 @@ async def test_views(u, v):
 
 
 async def test_morning(u, v):
-    print("\n── Morning Push ────────────────────────")
+    print("\n-- Morning Push ----------------------------")
     data = await compute_breakeven(u["id"], v["id"])
     ok("compute_breakeven runs",     "remit" in data and "breakeven" in data, str(data))
     ok("remit = 1050",               data["remit"] == 1050.0)
@@ -283,7 +287,7 @@ async def test_morning(u, v):
 
 
 async def test_setremit(v):
-    print("\n── Update Remittance Rate ──────────────")
+    print("\n-- Update Remittance Rate ------------------")
     await vehicle_svc.update_remittance_rate(v["id"], 1200.0)
     new_rate = await vehicle_svc.get_remittance_rate(v["id"])
     ok("rate updated to 1200",       new_rate == 1200.0, f"new={new_rate}")
@@ -298,7 +302,7 @@ async def test_setremit(v):
 
 
 async def test_mark_paid(u, v):
-    print("\n── Mark Client Paid ────────────────────")
+    print("\n-- Mark Client Paid ------------------------")
 
     # Create an unpaid trip for a named client
     await save_trip(u["id"], v["id"], 750.0, passenger_name="Test Client", paid=False)
@@ -328,7 +332,7 @@ async def test_mark_paid(u, v):
 
 
 async def test_passenger_deletion(u):
-    print("\n── Passenger Deletion ──────────────────")
+    print("\n-- Passenger Deletion ----------------------")
 
     async with get_db() as db:
         before = await db.fetchrow("SELECT COUNT(*) AS n FROM passengers WHERE user_id=$1", u["id"])
@@ -350,7 +354,7 @@ async def main():
     print("  Driver Ledger — Feature Test Suite")
     print("=" * 50)
 
-    print("\n── Database connection ─────────────────")
+    print("\n-- Database connection ---------------------")
     try:
         await init_db()
         ok("connected", True)

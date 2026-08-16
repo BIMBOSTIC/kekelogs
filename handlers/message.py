@@ -309,37 +309,37 @@ async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
         return
 
     total = paying["total"]
+    trips = paying["trips"]  # [{"id": ..., "amount": ...}], sorted ASC
+
     if amount >= total:
-        await update.message.reply_text(
-            f"That covers the full balance ({format_currency(currency, total)}).\n"
-            "Tap *Pay All* in the previous message instead.",
-            parse_mode="Markdown",
-        )
-        return
+        # Paying the full balance — mark all trips paid
+        to_pay_ids = [t["id"] for t in trips]
+        paid_total = total
+        still_owed = 0.0
+    else:
+        # Greedily apply payment to oldest trips first
+        remaining = amount
+        to_pay_ids = []
+        paid_total = 0.0
+        for trip in trips:
+            if remaining >= trip["amount"]:
+                to_pay_ids.append(trip["id"])
+                paid_total += trip["amount"]
+                remaining -= trip["amount"]
+            else:
+                break
 
-    # Greedily apply payment to oldest trips first (trips already sorted ASC)
-    trips = paying["trips"]  # [{"id": ..., "amount": ...}]
-    remaining = amount
-    to_pay_ids = []
-    paid_total = 0.0
-    for trip in trips:
-        if remaining >= trip["amount"]:
-            to_pay_ids.append(trip["id"])
-            paid_total += trip["amount"]
-            remaining -= trip["amount"]
-        else:
-            break
+        if not to_pay_ids:
+            first_amt = trips[0]["amount"]
+            await update.message.reply_text(
+                f"Amount is less than the oldest trip ({format_currency(currency, first_amt)}).\n"
+                "Send a larger amount or type `cancel`.",
+                parse_mode="Markdown",
+            )
+            return
 
-    if not to_pay_ids:
-        first_amt = trips[0]["amount"]
-        await update.message.reply_text(
-            f"Amount is less than the oldest trip ({format_currency(currency, first_amt)}).\n"
-            "Send a larger amount or type `cancel`.",
-            parse_mode="Markdown",
-        )
-        return
+        still_owed = total - paid_total
 
-    still_owed = total - paid_total
     passenger_id = paying["passenger_id"]
     name = paying["name"]
 
@@ -358,9 +358,15 @@ async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
 
     ctx.user_data.pop("paying_passenger", None)
 
-    await update.message.reply_text(
-        f"✅ *{name}* — {len(to_pay_ids)} trip(s) marked paid\n"
-        f"Paid: *{format_currency(currency, paid_total)}*\n"
-        f"Still owed: *{format_currency(currency, still_owed)}*",
-        parse_mode="Markdown",
-    )
+    if still_owed > 0:
+        await update.message.reply_text(
+            f"✅ *{name}* — {len(to_pay_ids)} trip(s) marked paid\n"
+            f"Paid: *{format_currency(currency, paid_total)}*\n"
+            f"Still owed: *{format_currency(currency, still_owed)}*",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ *{name}* fully paid — {format_currency(currency, paid_total)} settled ({len(to_pay_ids)} trip(s)).",
+            parse_mode="Markdown",
+        )
