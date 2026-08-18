@@ -1,6 +1,6 @@
 import io
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services import users as user_svc
@@ -60,10 +60,13 @@ async def handle_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         )
 
     elif entry_type == "expense":
-        await _save_expense(db_user["id"], vehicle["id"], data)
+        occ = datetime.fromisoformat(data["occurred_at"]) if data.get("occurred_at") else None
+        await _save_expense(db_user["id"], vehicle["id"], data, occurred_at=occ)
         amt = format_currency(currency, data["amount"])
+        date_note = f"\n📅 {occ.strftime('%d %b %Y')}" if occ else ""
         await q.edit_message_text(
-            f"✅ {data['expense_type'].title()} saved — *{amt}*", parse_mode="Markdown"
+            f"✅ {data['expense_type'].title()} saved — *{amt}*" + date_note,
+            parse_mode="Markdown",
         )
 
     elif entry_type == "remittance":
@@ -85,13 +88,14 @@ async def handle_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             await q.edit_message_text(f"✅ Remittance logged — *{amt}*", parse_mode="Markdown")
 
 
-async def _save_expense(user_id: int, vehicle_id: int, data: dict) -> None:
+async def _save_expense(user_id: int, vehicle_id: int, data: dict, occurred_at=None) -> None:
+    ts = occurred_at or datetime.now(timezone.utc)
     async with get_db() as db:
         row = await db.fetchrow(
-            """INSERT INTO expenses (user_id, vehicle_id, type, amount, note, litres, odometer)
-               VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id""",
+            """INSERT INTO expenses (user_id, vehicle_id, type, amount, note, litres, odometer, occurred_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id""",
             user_id, vehicle_id, data["expense_type"], data["amount"],
-            data.get("note"), data.get("litres"), data.get("odometer"),
+            data.get("note"), data.get("litres"), data.get("odometer"), ts,
         )
         snapshot = json.dumps({
             "expense_type": data["expense_type"],
@@ -99,6 +103,7 @@ async def _save_expense(user_id: int, vehicle_id: int, data: dict) -> None:
             "note": data.get("note"),
             "litres": data.get("litres"),
             "odometer": data.get("odometer"),
+            "occurred_at": ts.isoformat(),
         })
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)

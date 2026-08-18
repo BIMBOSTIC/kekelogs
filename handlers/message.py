@@ -167,12 +167,23 @@ async def _confirm_expense(update, ctx, parsed, currency, user_db_id):
     amount = parsed["amount"]
     note = parsed.get("note")
     litres = parsed.get("litres")
+    date_str = parsed.get("date_str")
+
+    occurred_at_iso = None
+    date_label = None
+    if date_str:
+        resolved = _parse_summary_date(date_str.split())
+        if resolved and resolved != date.today():
+            occurred_at_iso = datetime(resolved.year, resolved.month, resolved.day, 12, 0).isoformat()
+            date_label = resolved.strftime("%d %b %Y")
 
     icons = {"FUEL": "⛽", "REPAIR": "🔧", "WASHING": "🚿", "FINE": "📋",
              "INSURANCE": "🛡️", "TYRE": "🔄", "ACCESSORY": "🔩", "OTHER": "📎"}
     icon = icons.get(etype, "💸")
 
     lines = [f"*{format_currency(currency, amount)}*", f"Type: {etype.title()}"]
+    if date_label:
+        lines.append(f"Date: {date_label}")
     if note:
         lines.append(f"Note: {note}")
     if litres:
@@ -183,6 +194,7 @@ async def _confirm_expense(update, ctx, parsed, currency, user_db_id):
         "amount": amount, "note": note,
         "litres": litres, "odometer": parsed.get("odometer"),
         "user_db_id": user_db_id,
+        "occurred_at": occurred_at_iso,
     })
 
     await update.message.reply_text(

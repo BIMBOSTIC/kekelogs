@@ -50,7 +50,7 @@ Output ONLY valid JSON, no explanation.
 
 Schemas:
 Trip: {"type":"trip","amount":450,"destination":null,"passenger":null,"paid":true,"payment_method":"CASH"}
-Expense: {"type":"expense","expense_type":"FUEL","amount":2000,"note":null,"litres":null,"odometer":null}
+Expense: {"type":"expense","expense_type":"FUEL","amount":2000,"note":null,"litres":null,"odometer":null,"date_str":null}
   expense_type options: FUEL REPAIR ACCESSORY WASHING FINE INSURANCE TYRE OTHER
 Remittance: {"type":"remittance","amount":1050}
 
@@ -97,7 +97,13 @@ def _fast_parse(text: str) -> dict | None:
             return None
 
         tail = remainder[am.end():].strip()
-        litres = odometer = note = None
+        litres = odometer = note = date_str = None
+
+        # Extract date first (anchored to end) before other suffixes
+        dom = _DATE_ON.search(tail)
+        if dom:
+            date_str = dom.group(1).strip()
+            tail = tail[:dom.start()].strip()
 
         # Extract odometer first (unanchored) so its removal leaves litres at tail end
         om = _ODOMETER.search(tail)
@@ -120,6 +126,7 @@ def _fast_parse(text: str) -> dict | None:
             "note": note,
             "litres": litres,
             "odometer": odometer,
+            "date_str": date_str,
         }
 
     # Trip: number [destination [passenger...]]

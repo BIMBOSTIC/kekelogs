@@ -712,6 +712,21 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     cleared = db_user.get("log_cleared_at")
 
     async with get_db() as db:
+        last_fill = await db.fetchrow(
+            """SELECT occurred_at FROM expenses
+               WHERE user_id = $1 AND type = 'FUEL'
+                 AND ($2::timestamptz IS NULL OR occurred_at >= $2)
+               ORDER BY occurred_at DESC LIMIT 1""",
+            db_user["id"], cleared,
+        )
+        since_fill = None
+        if last_fill:
+            since_fill = await db.fetchrow(
+                """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
+                   FROM trips WHERE user_id = $1 AND paid = 1
+                     AND occurred_at >= $2""",
+                db_user["id"], last_fill["occurred_at"],
+            )
         rows = await db.fetch(
             """SELECT DATE_TRUNC('month', occurred_at) AS month,
                       SUM(amount) AS total, SUM(litres) AS total_litres, COUNT(*) AS fills
@@ -731,6 +746,14 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     lines = ["⛽ *Fuel — last 6 months*\n"]
+
+    if last_fill and since_fill:
+        days_ago = (date.today() - last_fill["occurred_at"].date()).days
+        fill_label = "today" if days_ago == 0 else f"{days_ago}d ago"
+        lines.append(f"*Since last fill* ({fill_label}):")
+        lines.append(f"Earned: *{format_currency(currency, since_fill['gross'])}*  ({since_fill['cnt']} trips)")
+        lines.append("──────────────────")
+
     for r in rows:
         month_str = r["month"].strftime("%b %Y")
         total = r["total"]
@@ -868,6 +891,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`450 kyrenia on aug 13` — log trip for a past day\n"
         f"`fuel 2000` — fuel expense\n"
         f"`fuel 2000 32l` — fuel with litres\n"
+        f"`fuel 2000 32l on aug 15` — fuel for a past day\n"
         f"`repair 600 bumper` — repair\n"
         f"`washing 120` — car wash\n"
         f"`remit 1050` — remittance paid\n\n"
