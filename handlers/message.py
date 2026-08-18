@@ -32,6 +32,8 @@ _EXACT_CMDS = {
     "help": cmd_help,
     "privacy": cmd_privacy,
     "fuel": cmd_fuel,
+    "last fill": cmd_fuel,
+    "since last fill": cmd_fuel,
     "edit": cmd_edit,
     "clear": cmd_clear,
 }
