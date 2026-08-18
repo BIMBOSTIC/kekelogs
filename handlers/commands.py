@@ -724,8 +724,8 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             since_fill = await db.fetchrow(
                 """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
                    FROM trips WHERE user_id = $1 AND paid = 1
-                     AND occurred_at >= $2""",
-                db_user["id"], last_fill["occurred_at"],
+                     AND DATE(occurred_at) >= $2""",
+                db_user["id"], last_fill["occurred_at"].date(),
             )
         rows = await db.fetch(
             """SELECT DATE_TRUNC('month', occurred_at) AS month,
