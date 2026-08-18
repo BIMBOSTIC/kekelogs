@@ -14,6 +14,23 @@ from utils.formatting import format_currency, format_log_label
 
 _logger = logging.getLogger(__name__)
 
+_COST_TYPE_ALIASES = {
+    "fuel": "FUEL", "petrol": "FUEL", "gas": "FUEL",
+    "repair": "REPAIR", "fix": "REPAIR",
+    "washing": "WASHING", "wash": "WASHING", "clean": "WASHING",
+    "fine": "FINE",
+    "insurance": "INSURANCE",
+    "tyre": "TYRE", "tire": "TYRE",
+    "accessory": "ACCESSORY", "accessories": "ACCESSORY",
+    "other": "OTHER",
+}
+
+_COST_TYPE_LABELS = {
+    "FUEL": "Fuel", "REPAIR": "Repair", "WASHING": "Washing",
+    "FINE": "Fine", "INSURANCE": "Insurance", "TYRE": "Tyre",
+    "ACCESSORY": "Accessory", "OTHER": "Other",
+}
+
 
 async def cmd_undo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
@@ -710,23 +727,38 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     currency = db_user["currency"]
     cleared = db_user.get("log_cleared_at")
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
 
     async with get_db() as db:
         last_fill = await db.fetchrow(
-            """SELECT occurred_at FROM expenses
+            """SELECT occurred_at, amount FROM expenses
                WHERE user_id = $1 AND type = 'FUEL'
                  AND ($2::timestamptz IS NULL OR occurred_at >= $2)
                ORDER BY occurred_at DESC LIMIT 1""",
             db_user["id"], cleared,
         )
-        since_fill = None
+        since_paid = since_owed = since_remit = None
         if last_fill:
-            since_fill = await db.fetchrow(
+            fill_date = last_fill["occurred_at"].date()
+            since_paid = await db.fetchrow(
                 """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
                    FROM trips WHERE user_id = $1 AND paid = 1
                      AND DATE(occurred_at) >= $2""",
-                db_user["id"], last_fill["occurred_at"].date(),
+                db_user["id"], fill_date,
             )
+            since_owed = await db.fetchrow(
+                """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
+                   FROM trips WHERE user_id = $1 AND paid = 0
+                     AND DATE(occurred_at) >= $2""",
+                db_user["id"], fill_date,
+            )
+            if vehicle:
+                since_remit = await db.fetchrow(
+                    """SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS days
+                       FROM remittance_log WHERE vehicle_id = $1 AND status = 'PAID'
+                         AND paid_on >= $2""",
+                    vehicle["id"], fill_date,
+                )
         rows = await db.fetch(
             """SELECT DATE_TRUNC('month', occurred_at) AS month,
                       SUM(amount) AS total, SUM(litres) AS total_litres, COUNT(*) AS fills
@@ -747,11 +779,31 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines = ["⛽ *Fuel — last 6 months*\n"]
 
-    if last_fill and since_fill:
-        days_ago = (date.today() - last_fill["occurred_at"].date()).days
+    if last_fill:
+        fill_date = last_fill["occurred_at"].date()
+        days_ago = (date.today() - fill_date).days
         fill_label = "today" if days_ago == 0 else f"{days_ago}d ago"
-        lines.append(f"*Since last fill* ({fill_label}):")
-        lines.append(f"Earned: *{format_currency(currency, since_fill['gross'])}*  ({since_fill['cnt']} trips)")
+        fill_day_str = fill_date.strftime("%b %d").replace(" 0", " ")
+
+        gross = float(since_paid["gross"]) if since_paid else 0.0
+        paid_cnt = int(since_paid["cnt"]) if since_paid else 0
+        owed = float(since_owed["gross"]) if since_owed else 0.0
+        owed_cnt = int(since_owed["cnt"]) if since_owed else 0
+        fuel_cost = float(last_fill["amount"])
+        remit_total = float(since_remit["total"]) if since_remit else 0.0
+        remit_days = int(since_remit["days"]) if since_remit else 0
+        net = gross - fuel_cost - remit_total
+
+        lines.append(f"*Since last fill* ({fill_label} — {fill_day_str}):")
+        lines.append(f"Earned:  *{format_currency(currency, gross)}*  ({paid_cnt} trips)")
+        if owed > 0:
+            lines.append(f"Owed:   +*{format_currency(currency, owed)}*  ({owed_cnt} unpaid)")
+        lines.append("─────")
+        lines.append(f"Fuel:   −*{format_currency(currency, fuel_cost)}*")
+        if remit_total > 0:
+            lines.append(f"Remit:  −*{format_currency(currency, remit_total)}*  ({remit_days}d paid)")
+        sign = "+" if net >= 0 else ""
+        lines.append(f"Net:    *{sign}{format_currency(currency, net)}*")
         lines.append("──────────────────")
 
     for r in rows:
@@ -759,12 +811,112 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         total = r["total"]
         fills = r["fills"]
         litres = r["total_litres"]
-
         line = f"*{month_str}* — {format_currency(currency, total)}  ({fills} fills)"
         if litres:
             cpl = total / litres
             line += f"\n  {litres:.0f} L · {format_currency(currency, cpl)}/L"
         lines.append(line)
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_costs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    args = list(ctx.args or [])
+    currency = db_user["currency"]
+    cleared = db_user.get("log_cleared_at")
+
+    # Optional type filter (first arg)
+    type_filter = None
+    if args and args[0].lower() in _COST_TYPE_ALIASES:
+        type_filter = _COST_TYPE_ALIASES[args.pop(0).lower()]
+
+    # Optional period / date (remaining args)
+    start_date = end_date = None
+    limit = 15
+    period_label = "last 15"
+
+    if args:
+        kw = args[0].lower()
+        if kw == "week":
+            start_date = date.today() - timedelta(days=6)
+            period_label = "last 7 days"
+            limit = 100
+        elif kw == "month":
+            today = date.today()
+            start_date = date(today.year, today.month, 1)
+            period_label = today.strftime("%B")
+            limit = 100
+        else:
+            resolved = _parse_summary_date(args)
+            if resolved is None:
+                await update.message.reply_text(
+                    "Usage: `costs [type] [week|month|date]`\n"
+                    "E.g. `costs fuel week`, `costs aug 15`, `costs repair month`",
+                    parse_mode="Markdown",
+                )
+                return
+            start_date = end_date = resolved
+            period_label = resolved.strftime("%d %b")
+            limit = 100
+
+    icon_map = {
+        "FUEL": "⛽", "REPAIR": "🔧", "WASHING": "🚿", "FINE": "📋",
+        "INSURANCE": "🛡️", "TYRE": "🔄", "ACCESSORY": "🔩", "OTHER": "📎",
+    }
+
+    async with get_db() as db:
+        rows = await db.fetch(
+            """SELECT type, amount, note, litres, occurred_at
+               FROM expenses
+               WHERE user_id = $1
+                 AND ($2::text IS NULL OR type = $2)
+                 AND ($3::date IS NULL OR DATE(occurred_at) >= $3)
+                 AND ($4::date IS NULL OR DATE(occurred_at) <= $4)
+                 AND ($5::timestamptz IS NULL OR occurred_at >= $5)
+               ORDER BY occurred_at DESC
+               LIMIT $6""",
+            db_user["id"], type_filter, start_date, end_date, cleared, limit,
+        )
+
+    if not rows:
+        label = _COST_TYPE_LABELS.get(type_filter, "expense").lower() if type_filter else "expense"
+        await update.message.reply_text(f"No {label} expenses found for that period.")
+        return
+
+    type_label = _COST_TYPE_LABELS.get(type_filter, "All") if type_filter else "All"
+    lines = [f"💸 *{type_label} costs — {period_label}*\n"]
+
+    by_type: dict[str, float] = {}
+    grand_total = 0.0
+    for r in rows:
+        etype = r["type"]
+        amt = float(r["amount"])
+        grand_total += amt
+        by_type[etype] = by_type.get(etype, 0.0) + amt
+
+        day_str = r["occurred_at"].strftime("%d %b")
+        icon = icon_map.get(etype, "💸")
+        type_str = f" {_COST_TYPE_LABELS.get(etype, etype.title())}" if not type_filter else ""
+        line = f"{icon} `{day_str}` — *{format_currency(currency, amt)}*{type_str}"
+        if r["note"]:
+            line += f" · {r['note']}"
+        if r["litres"]:
+            cpl = amt / r["litres"]
+            line += f" · {r['litres']:.0f}L ({format_currency(currency, cpl)}/L)"
+        lines.append(line)
+
+    lines.append("──────────────────")
+    if not type_filter and len(by_type) > 1:
+        for etype, total in sorted(by_type.items(), key=lambda x: -x[1]):
+            lbl = _COST_TYPE_LABELS.get(etype, etype.title())
+            lines.append(f"{lbl}: {format_currency(currency, total)}")
+    lines.append(f"*Total: {format_currency(currency, grand_total)}*")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -907,7 +1059,10 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`morning on 07:00` — daily break-even push before your shift\n"
         f"`week` — weekly summary\n"
         f"`month` — monthly summary\n"
-        f"`fuel` — fuel cost history\n"
+        f"`fuel` — fuel cost history & P&L since last fill\n"
+        f"`costs` — expense history (last 15)\n"
+        f"`costs fuel week` — fuel expenses this week\n"
+        f"`costs aug 15` — expenses on a specific date\n"
         f"`owed` — unpaid trips by client\n"
         f"`clients` — top clients\n"
         f"`setremit 1200` — update daily remittance rate\n"

@@ -17,7 +17,7 @@ from handlers.commands import (
     cmd_undo, cmd_redo, cmd_day, cmd_today, cmd_week, cmd_month,
     cmd_clients, cmd_owed, cmd_setremit, cmd_car, cmd_rest, cmd_morning,
     cmd_fuel, cmd_help, cmd_privacy, cmd_deleteme, cmd_report,
-    cmd_edit, cmd_clear, cmd_summary,
+    cmd_edit, cmd_clear, cmd_summary, cmd_costs,
 )
 from services.morning import schedule_all_morning_pushes
 
@@ -60,6 +60,7 @@ def main() -> None:
     app.add_handler(CommandHandler("edit", cmd_edit))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("summary", cmd_summary))
+    app.add_handler(CommandHandler("costs", cmd_costs))
 
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^ct:"))
     app.add_handler(CallbackQueryHandler(handle_cancel, pattern="^cn:"))

@@ -12,7 +12,7 @@ from handlers.commands import (
     cmd_undo, cmd_redo, cmd_day, cmd_today, cmd_week, cmd_month,
     cmd_clients, cmd_owed, cmd_setremit, cmd_car, cmd_rest, cmd_morning,
     cmd_fuel, cmd_help, cmd_privacy, cmd_report, cmd_edit, cmd_clear,
-    cmd_summary, _parse_summary_date,
+    cmd_summary, cmd_costs, _parse_summary_date,
 )
 from utils.formatting import snapshot_to_hint
 
@@ -45,6 +45,7 @@ _PREFIX_CMDS = {
     "morning": cmd_morning,
     "report": cmd_report,
     "summary": cmd_summary,
+    "costs": cmd_costs,
 }
 
 
