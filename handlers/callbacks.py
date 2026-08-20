@@ -15,15 +15,17 @@ from utils.formatting import format_currency, snapshot_to_hint, format_log_label
 
 async def handle_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    await q.answer()
     uid = update.effective_user.id
     entry_type = q.data.split(":", 1)[1]
 
     pending_json = ctx.user_data.get("pending")
     if not pending_json:
-        await q.edit_message_text("This confirmation expired. Please try again.")
+        # No pending data — either already saved (Telegram retry) or session expired.
+        # Answer with a popup so the success message isn't overwritten.
+        await q.answer("Already saved — or session expired, try again if needed.", show_alert=True)
         return
 
+    await q.answer()
     data = json.loads(pending_json)
     ctx.user_data.pop("pending", None)
 
