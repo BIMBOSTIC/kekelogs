@@ -344,11 +344,11 @@ async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
         paid_total = total
         still_owed = 0.0
     else:
-        # Greedily apply payment to oldest trips first
+        # Sort smallest-first so a partial payment clears as many trips as possible
         remaining = amount
         to_pay_ids = []
         paid_total = 0.0
-        for trip in trips:
+        for trip in sorted(trips, key=lambda t: t["amount"]):
             if remaining >= trip["amount"]:
                 to_pay_ids.append(trip["id"])
                 paid_total += trip["amount"]
@@ -357,9 +357,9 @@ async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
                 break
 
         if not to_pay_ids:
-            first_amt = trips[0]["amount"]
+            min_amt = min(t["amount"] for t in trips)
             await update.message.reply_text(
-                f"Amount is less than the oldest trip ({format_currency(currency, first_amt)}).\n"
+                f"Amount is less than the smallest unpaid trip ({format_currency(currency, min_amt)}).\n"
                 "Send a larger amount or type `cancel`.",
                 parse_mode="Markdown",
             )

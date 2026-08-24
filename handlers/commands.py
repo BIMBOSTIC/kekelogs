@@ -1056,6 +1056,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`clear` — start fresh (data kept, views reset)\n"
         f"`today` — today's profit & break-even\n"
         f"`summary yesterday` — full detail for any day\n"
+        f"`summary last 3` — last 3 days profit chart\n"
         f"`rest` — mark today as a rest day (no remittance)\n"
         f"`morning on 07:00` — daily break-even push before your shift\n"
         f"`week` — weekly summary\n"
@@ -1147,6 +1148,95 @@ def _parse_summary_date(args: list) -> date | None:
     return None
 
 
+async def _cmd_summary_range(update, ctx, db_user: dict, n: int) -> None:
+    currency = db_user["currency"]
+    vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+    remit_rate = await vehicle_svc.get_remittance_rate(vehicle["id"]) if vehicle else 0.0
+    today = date.today()
+    start = today - timedelta(days=n - 1)
+    cleared = db_user.get("log_cleared_at")
+    effective_start = max(start, cleared.date()) if cleared and cleared.date() > start else start
+
+    async with get_db() as db:
+        trip_rows = await db.fetch(
+            """SELECT DATE(occurred_at) AS day,
+                      COALESCE(SUM(CASE WHEN paid = 1 THEN amount ELSE 0 END), 0) AS gross,
+                      COALESCE(SUM(CASE WHEN paid = 0 THEN amount ELSE 0 END), 0) AS owed
+               FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2
+                 AND ($3::timestamptz IS NULL OR occurred_at >= $3)
+               GROUP BY DATE(occurred_at)""",
+            db_user["id"], effective_start, cleared,
+        )
+        expense_rows = await db.fetch(
+            """SELECT DATE(occurred_at) AS day, COALESCE(SUM(amount), 0) AS costs
+               FROM expenses WHERE user_id = $1 AND DATE(occurred_at) >= $2
+                 AND ($3::timestamptz IS NULL OR occurred_at >= $3)
+               GROUP BY DATE(occurred_at)""",
+            db_user["id"], effective_start, cleared,
+        )
+        remit_rows = await db.fetch(
+            "SELECT paid_on AS day, status, amount FROM remittance_log WHERE vehicle_id = $1 AND paid_on >= $2",
+            vehicle["id"] if vehicle else 0, effective_start,
+        ) if vehicle else []
+
+    trips_by_day = {r["day"]: r for r in trip_rows}
+    costs_by_day = {r["day"]: float(r["costs"]) for r in expense_rows}
+    remit_by_day = {r["day"]: r for r in remit_rows}
+
+    days = []
+    d = effective_start
+    while d <= today:
+        tr = trips_by_day.get(d)
+        gross = float(tr["gross"]) if tr else 0.0
+        owed = float(tr["owed"]) if tr else 0.0
+        costs = costs_by_day.get(d, 0.0)
+        remit_r = remit_by_day.get(d)
+        if remit_r and remit_r["status"] in ("REST",):
+            remit = 0.0
+        elif remit_r and remit_r["status"] == "PAID":
+            remit = float(remit_r["amount"])
+        else:
+            remit = remit_rate
+        profit = gross - costs - remit
+        days.append({"date": d, "gross": gross, "owed": owed, "costs": costs, "profit": profit})
+        d += timedelta(days=1)
+
+    if not days:
+        await update.message.reply_text("No data for that period.")
+        return
+
+    profits = [d["profit"] for d in days]
+    bar_max = max((abs(p) for p in profits), default=1) or 1
+
+    total_gross = sum(d["gross"] for d in days)
+    total_owed = sum(d["owed"] for d in days)
+    total_costs = sum(d["costs"] for d in days)
+    total_profit = sum(d["profit"] for d in days)
+
+    label = f"Last {n} days" if effective_start == start else f"Last {n} days (since clear)"
+    lines = [f"📋 *{label}*\n"]
+
+    for d in days:
+        profit = d["profit"]
+        bar_len = min(8, round(abs(profit) / bar_max * 8))
+        bar = ("█" if profit >= 0 else "▒") * bar_len + "░" * (8 - bar_len)
+        sign = "+" if profit >= 0 else ""
+        day_label = d["date"].strftime("%a") + " " + str(d["date"].day)
+        owed_note = f" (+{format_currency(currency, d['owed'])} owed)" if d["owed"] > 0 else ""
+        lines.append(f"`{day_label:<7}` {bar}  {sign}{format_currency(currency, profit)}{owed_note}")
+
+    lines.append("\n──────────────────")
+    lines.append(f"Earned:  *{format_currency(currency, total_gross)}*")
+    if total_owed > 0:
+        lines.append(f"Owed:    *+{format_currency(currency, total_owed)}*")
+    if total_costs > 0:
+        lines.append(f"Costs:   *−{format_currency(currency, total_costs)}*")
+    sign = "+" if total_profit >= 0 else ""
+    lines.append(f"Profit:  *{sign}{format_currency(currency, total_profit)}*")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
 async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     db_user = await user_svc.get_user(uid)
@@ -1155,11 +1245,27 @@ async def cmd_summary(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     args = ctx.args or []
+
+    if args and args[0].lower() == "last":
+        try:
+            n = int(args[1])
+            if not (1 <= n <= 90):
+                raise ValueError
+        except (IndexError, ValueError):
+            await update.message.reply_text(
+                "Usage: `summary last 3` or `summary last 7 days`",
+                parse_mode="Markdown",
+            )
+            return
+        await _cmd_summary_range(update, ctx, db_user, n)
+        return
+
     target = _parse_summary_date(args)
     if target is None:
         await update.message.reply_text(
             "Couldn't understand the date. Try:\n"
             "`summary yesterday`\n"
+            "`summary last 3`\n"
             "`summary aug 8`\n"
             "`summary 2026-08-08`",
             parse_mode="Markdown",
