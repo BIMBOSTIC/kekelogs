@@ -336,15 +336,17 @@ async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
         return
 
     total = paying["total"]
-    trips = paying["trips"]  # [{"id": ..., "amount": ...}], sorted ASC
+    trips = paying["trips"]
+    passenger_id = paying["passenger_id"]
+    name = paying["name"]
 
     if amount >= total:
-        # Paying the full balance — mark all trips paid
         to_pay_ids = [t["id"] for t in trips]
         paid_total = total
         still_owed = 0.0
+        split_info = None
     else:
-        # Sort smallest-first so a partial payment clears as many trips as possible
+        # Cover complete trips smallest-first, then split the next trip for any remainder
         remaining = amount
         to_pay_ids = []
         paid_total = 0.0
@@ -356,35 +358,60 @@ async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
             else:
                 break
 
-        if not to_pay_ids:
-            min_amt = min(t["amount"] for t in trips)
-            await update.message.reply_text(
-                f"Amount is less than the smallest unpaid trip ({format_currency(currency, min_amt)}).\n"
-                "Send a larger amount or type `cancel`.",
-                parse_mode="Markdown",
-            )
-            return
+        split_info = None
+        if remaining > 0:
+            covered = {t_id for t_id in to_pay_ids}
+            next_trip = next(t for t in sorted(trips, key=lambda t: t["amount"]) if t["id"] not in covered)
+            split_info = {
+                "id": next_trip["id"],
+                "paid_portion": remaining,
+                "owed_portion": next_trip["amount"] - remaining,
+            }
+            paid_total += remaining
 
         still_owed = total - paid_total
 
-    passenger_id = paying["passenger_id"]
-    name = paying["name"]
-
     async with get_db() as db:
-        await db.execute(
-            "UPDATE trips SET paid = 1 WHERE id = ANY($1::int[]) AND user_id = $2",
-            to_pay_ids, db_user["id"],
-        )
+        if to_pay_ids:
+            await db.execute(
+                "UPDATE trips SET paid = 1 WHERE id = ANY($1::int[]) AND user_id = $2",
+                to_pay_ids, db_user["id"],
+            )
+
+        new_trip_id = None
+        if split_info:
+            orig = await db.fetchrow(
+                "SELECT vehicle_id, destination, passenger_id, payment_method, occurred_at FROM trips WHERE id = $1",
+                split_info["id"],
+            )
+            # Reduce original trip to the remaining owed amount
+            await db.execute(
+                "UPDATE trips SET amount = $1 WHERE id = $2 AND user_id = $3",
+                split_info["owed_portion"], split_info["id"], db_user["id"],
+            )
+            # Insert a paid record for the portion received
+            row = await db.fetchrow(
+                """INSERT INTO trips (user_id, vehicle_id, amount, destination, passenger_id, paid, payment_method, occurred_at)
+                   VALUES ($1, $2, $3, $4, $5, 1, $6, $7) RETURNING id""",
+                db_user["id"], orig["vehicle_id"], split_info["paid_portion"],
+                orig["destination"], orig["passenger_id"], orig["payment_method"], orig["occurred_at"],
+            )
+            new_trip_id = row["id"]
+
         await db.execute(
             """UPDATE passengers
                SET lifetime_revenue = lifetime_revenue + $1,
                    trip_count = trip_count + $2
                WHERE id = $3 AND user_id = $4""",
-            paid_total, len(to_pay_ids), passenger_id, db_user["id"],
+            paid_total, len(to_pay_ids) + (1 if split_info else 0), passenger_id, db_user["id"],
         )
         snapshot = json.dumps({
             "passenger_id": passenger_id, "name": name,
             "trip_ids": to_pay_ids, "paid_total": paid_total, "trip_count": len(to_pay_ids),
+            "split_trip_id": split_info["id"] if split_info else None,
+            "split_new_trip_id": new_trip_id,
+            "split_owed_portion": split_info["owed_portion"] if split_info else None,
+            "split_paid_portion": split_info["paid_portion"] if split_info else None,
         })
         await db.execute(
             """INSERT INTO action_log (user_id, action_type, table_name, record_id, snapshot)
@@ -397,13 +424,12 @@ async def _handle_partial_payment(update, ctx, db_user: dict) -> None:
 
     if still_owed > 0:
         await update.message.reply_text(
-            f"✅ *{name}* — {len(to_pay_ids)} trip(s) marked paid\n"
-            f"Paid: *{format_currency(currency, paid_total)}*\n"
+            f"✅ *{name}* — {format_currency(currency, paid_total)} received\n"
             f"Still owed: *{format_currency(currency, still_owed)}*",
             parse_mode="Markdown",
         )
     else:
         await update.message.reply_text(
-            f"✅ *{name}* fully paid — {format_currency(currency, paid_total)} settled ({len(to_pay_ids)} trip(s)).",
+            f"✅ *{name}* fully paid — {format_currency(currency, paid_total)} settled.",
             parse_mode="Markdown",
         )
