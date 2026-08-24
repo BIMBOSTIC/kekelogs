@@ -314,8 +314,11 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     async with get_db() as db:
         trip_rows = await db.fetch(
-            """SELECT DATE(occurred_at) AS day, COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
-               FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2 AND paid = 1
+            """SELECT DATE(occurred_at) AS day,
+                      COALESCE(SUM(CASE WHEN paid = 1 THEN amount ELSE 0 END), 0) AS gross,
+                      COALESCE(SUM(CASE WHEN paid = 0 THEN amount ELSE 0 END), 0) AS owed,
+                      COUNT(*) AS cnt
+               FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2
                  AND ($3::timestamptz IS NULL OR occurred_at >= $3)
                GROUP BY DATE(occurred_at)""",
             db_user["id"], effective_start, cleared,
@@ -332,18 +335,20 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             vehicle["id"] if vehicle else 0, effective_start,
         ) if vehicle else []
 
-    trips_by_day = {r["day"]: (r["gross"], r["cnt"]) for r in trip_rows}
+    trips_by_day = {r["day"]: r for r in trip_rows}
     costs_by_day = {r["day"]: r["costs"] for r in expense_rows}
     remit_by_day = {r["day"]: r["status"] for r in remit_rows}
 
     days = []
     d = effective_start
     while d <= today:
-        gross, cnt = trips_by_day.get(d, (0.0, 0))
+        tr = trips_by_day.get(d)
+        gross = float(tr["gross"]) if tr else 0.0
+        owed = float(tr["owed"]) if tr else 0.0
         costs = costs_by_day.get(d, 0.0)
         remit = 0.0 if remit_by_day.get(d) == "REST" else remit_rate
         profit = gross - costs - remit
-        days.append({"date": d, "gross": gross, "profit": profit, "cnt": cnt})
+        days.append({"date": d, "gross": gross, "owed": owed, "profit": profit})
         d += timedelta(days=1)
 
     if not days:
@@ -356,6 +361,7 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     bar_max = max((abs(p) for p in profits), default=1) or 1
 
     week_gross = sum(d["gross"] for d in days)
+    week_owed = sum(d["owed"] for d in days)
     week_profit = sum(d["profit"] for d in days)
 
     header = "📅 *Since clear*\n" if cleared and cleared.date() > week_start else "📅 *Last 7 days*\n"
@@ -367,10 +373,13 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         star = " ⭐" if d["date"] == best["date"] and profit > 0 else ""
         sign = "+" if profit >= 0 else ""
         day_label = d["date"].strftime("%a") + " " + str(d["date"].day)
-        lines.append(f"`{day_label:<7}` {bar}  {sign}{format_currency(currency, profit)}{star}")
+        owed_note = f" (+{format_currency(currency, d['owed'])} owed)" if d["owed"] > 0 else ""
+        lines.append(f"`{day_label:<7}` {bar}  {sign}{format_currency(currency, profit)}{owed_note}{star}")
 
     lines.append("\n──────────────────")
     lines.append(f"Earnings: *{format_currency(currency, week_gross)}*")
+    if week_owed > 0:
+        lines.append(f"Owed:     *+{format_currency(currency, week_owed)}*")
     sign = "+" if week_profit >= 0 else ""
     lines.append(f"Profit:   *{sign}{format_currency(currency, week_profit)}*")
     if best["profit"] != worst["profit"]:
@@ -403,6 +412,12 @@ async def cmd_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                  AND ($3::timestamptz IS NULL OR occurred_at >= $3)""",
             db_user["id"], effective_start, cleared,
         )
+        owed_row = await db.fetchrow(
+            """SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS cnt
+               FROM trips WHERE user_id = $1 AND DATE(occurred_at) >= $2 AND paid = 0
+                 AND ($3::timestamptz IS NULL OR occurred_at >= $3)""",
+            db_user["id"], effective_start, cleared,
+        )
         ex_rows = await db.fetch(
             """SELECT type, COALESCE(SUM(amount), 0) AS total
                FROM expenses WHERE user_id = $1 AND DATE(occurred_at) >= $2
@@ -419,6 +434,8 @@ async def cmd_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     gross = tr["gross"]
     trip_count = tr["trips"]
     days_worked = tr["days"]
+    month_owed = float(owed_row["total"]) if owed_row else 0.0
+    owed_cnt = int(owed_row["cnt"]) if owed_row else 0
     total_expenses = sum(r["total"] for r in ex_rows)
     remit_total = remit["total"] if remit else 0.0
     remit_days = remit["days_paid"] if remit else 0
@@ -432,6 +449,8 @@ async def cmd_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines = [f"📆 *{month_name}*\n"]
     lines.append(f"Earnings: *{format_currency(currency, gross)}*  ({trip_count} trips, {days_worked} days)")
+    if month_owed > 0:
+        lines.append(f"Owed:     *+{format_currency(currency, month_owed)}*  ({owed_cnt} unpaid)")
     lines.append("──────────────────")
 
     for r in ex_rows:
