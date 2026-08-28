@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 from services import users as user_svc
 from services import vehicles as vehicle_svc
 from services.trips import (
-    save_trip, update_trip, update_expense, update_remittance_entry,
+    save_trip, update_trip, update_expense, update_remittance_entry, delete_entry,
 )
 from services.report import build_report, _PERIOD_LABELS
 from db.database import get_db
@@ -397,6 +397,92 @@ async def handle_edit_cancel_inline(update: Update, ctx: ContextTypes.DEFAULT_TY
     ctx.user_data.pop("pending_edit", None)
     ctx.user_data.pop("editing", None)
     await q.edit_message_text("Edit cancelled.")
+
+
+async def handle_delete_entry_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    try:
+        log_id = int(q.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await q.edit_message_text("Invalid request.")
+        return
+
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user:
+        await q.edit_message_text("Session expired. Please run /start.")
+        return
+
+    async with get_db() as db:
+        log = await db.fetchrow(
+            "SELECT * FROM action_log WHERE id = $1 AND user_id = $2",
+            log_id, db_user["id"],
+        )
+
+    if not log:
+        await q.edit_message_text("Entry not found — it may have already been deleted.")
+        return
+
+    log = dict(log)
+    snapshot = json.loads(log["snapshot"])
+    label = format_log_label(log["action_type"], snapshot, db_user["currency"])
+
+    await q.edit_message_text(
+        f"🗑 *Delete this entry?*\n\n`{label}`\n\n⚠️ This cannot be undone.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✓ Delete", callback_data=f"del_ok:{log_id}"),
+            InlineKeyboardButton("✗ Cancel", callback_data="del_no"),
+        ]]),
+        parse_mode="Markdown",
+    )
+
+
+async def handle_delete_entry_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    try:
+        log_id = int(q.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await q.edit_message_text("Invalid request.")
+        return
+
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user:
+        await q.edit_message_text("Session expired. Please run /start.")
+        return
+
+    result = await delete_entry(db_user["id"], log_id)
+    if not result:
+        await q.edit_message_text("Entry not found — it may have already been deleted.")
+        return
+
+    currency = db_user["currency"]
+    s = result["snapshot"]
+    atype = result["action_type"]
+
+    if atype == "trip":
+        detail = format_currency(currency, s["amount"])
+        if s.get("destination"):
+            detail += f" → {s['destination']}"
+        label = f"Trip: {detail}"
+    elif atype == "expense":
+        label = f"{s.get('expense_type', 'Expense').title()}: {format_currency(currency, s['amount'])}"
+    elif atype == "remittance":
+        label = "Rest day" if s.get("status") == "REST" else f"Remittance: {format_currency(currency, s['amount'])}"
+    elif atype == "mark_paid":
+        label = f"Payment: {s.get('name', 'Client')} — {format_currency(currency, s.get('paid_total', 0))}"
+    else:
+        label = "Entry"
+
+    await q.edit_message_text(f"🗑 Deleted: *{label}*", parse_mode="Markdown")
+
+
+async def handle_delete_entry_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text("Cancelled.")
 
 
 async def handle_clear_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

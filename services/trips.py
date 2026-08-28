@@ -323,6 +323,60 @@ async def update_expense(record_id: int, user_id: int, parsed: dict) -> None:
         )
 
 
+async def delete_entry(user_id: int, log_id: int) -> dict | None:
+    async with get_db() as db:
+        log = await db.fetchrow(
+            "SELECT * FROM action_log WHERE id = $1 AND user_id = $2",
+            log_id, user_id,
+        )
+        if not log:
+            return None
+
+        log = dict(log)
+        snapshot = json.loads(log["snapshot"])
+
+        if log["action_type"] == "mark_paid":
+            trip_ids = snapshot.get("trip_ids", [])
+            paid_total = snapshot.get("paid_total", 0.0)
+            trip_count_val = snapshot.get("trip_count", 0)
+            passenger_id = snapshot.get("passenger_id")
+            if trip_ids:
+                await db.execute("UPDATE trips SET paid = 0 WHERE id = ANY($1::int[])", trip_ids)
+            if passenger_id and paid_total:
+                await db.execute(
+                    """UPDATE passengers
+                       SET lifetime_revenue = GREATEST(0, lifetime_revenue - $1),
+                           trip_count = GREATEST(0, trip_count - $2)
+                       WHERE id = $3""",
+                    paid_total, trip_count_val, passenger_id,
+                )
+        else:
+            sql = _DELETE_SQL.get(log["table_name"])
+            if sql is None:
+                _logger.error("Illegal table_name %r in action_log id=%s", log["table_name"], log["id"])
+                raise ValueError(f"Illegal table_name: {log['table_name']!r}")
+            await db.execute(sql, log["record_id"])
+
+            if log["action_type"] == "trip":
+                pname = snapshot.get("passenger_name")
+                if pname and snapshot.get("paid"):
+                    p = await db.fetchrow(
+                        "SELECT id FROM passengers WHERE user_id = $1 AND LOWER(display_name) = $2",
+                        user_id, pname.lower(),
+                    )
+                    if p:
+                        await db.execute(
+                            """UPDATE passengers
+                               SET lifetime_revenue = GREATEST(0, lifetime_revenue - $1),
+                                   trip_count = GREATEST(0, trip_count - 1)
+                               WHERE id = $2""",
+                            snapshot["amount"], p["id"],
+                        )
+
+        await db.execute("DELETE FROM action_log WHERE id = $1", log["id"])
+        return {"action_type": log["action_type"], "snapshot": snapshot}
+
+
 async def update_remittance_entry(record_id: int, vehicle_id: int, user_id: int, amount: float) -> None:
     async with get_db() as db:
         await db.execute(

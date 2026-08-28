@@ -1028,6 +1028,54 @@ async def cmd_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_delete(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    db_user = await user_svc.get_user(uid)
+    if not db_user or not db_user["onboarded"]:
+        await update.message.reply_text("Please run /start first.")
+        return
+
+    args = ctx.args or []
+    target = _parse_summary_date(args)
+    if target is None:
+        await update.message.reply_text(
+            "Couldn't understand the date. Try:\n"
+            "`delete` — today's entries\n"
+            "`delete yesterday`\n"
+            "`delete aug 8`",
+            parse_mode="Markdown",
+        )
+        return
+
+    currency = db_user["currency"]
+
+    async with get_db() as db:
+        logs = await db.fetch(
+            """SELECT id, action_type, snapshot FROM action_log
+               WHERE user_id = $1 AND DATE(created_at) = $2
+               ORDER BY created_at DESC""",
+            db_user["id"], target,
+        )
+
+    if not logs:
+        day_label = "today" if target == date.today() else target.strftime("%d %b %Y")
+        await update.message.reply_text(f"No entries logged on {day_label}.")
+        return
+
+    day_label = "today" if target == date.today() else target.strftime("%d %b %Y")
+    buttons = []
+    for log in logs:
+        snap = json.loads(log["snapshot"])
+        label = format_log_label(log["action_type"], snap, currency)
+        buttons.append([InlineKeyboardButton(f"🗑 {label}", callback_data=f"del_sel:{log['id']}")])
+
+    await update.message.reply_text(
+        f"🗑 *Delete an entry — {day_label}*\n\nTap the entry you want to remove:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
+
+
 async def cmd_clear(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     db_user = await user_svc.get_user(uid)
@@ -1072,6 +1120,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`undo` — remove last entry\n"
         f"`redo` — restore last undone entry\n"
         f"`edit` — edit one of the last 3 entries\n"
+        f"`delete` — delete any entry from today\n"
+        f"`delete yesterday` — delete any entry from a past day\n"
         f"`clear` — start fresh (data kept, views reset)\n"
         f"`today` — today's profit & break-even\n"
         f"`summary yesterday` — full detail for any day\n"
