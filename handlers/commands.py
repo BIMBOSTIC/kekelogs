@@ -348,7 +348,7 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         costs = costs_by_day.get(d, 0.0)
         remit = 0.0 if remit_by_day.get(d) == "REST" else remit_rate
         profit = gross - costs - remit
-        days.append({"date": d, "gross": gross, "owed": owed, "profit": profit})
+        days.append({"date": d, "gross": gross, "owed": owed, "costs": costs, "remit": remit, "profit": profit})
         d += timedelta(days=1)
 
     if not days:
@@ -362,6 +362,8 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     week_gross = sum(d["gross"] for d in days)
     week_owed = sum(d["owed"] for d in days)
+    week_costs = sum(d["costs"] for d in days)
+    week_remit = sum(d["remit"] for d in days)
     week_profit = sum(d["profit"] for d in days)
 
     header = "📅 *Since clear*\n" if cleared and cleared.date() > week_start else "📅 *Last 7 days*\n"
@@ -380,6 +382,10 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     lines.append(f"Earnings: *{format_currency(currency, week_gross)}*")
     if week_owed > 0:
         lines.append(f"Owed:     *+{format_currency(currency, week_owed)}*")
+    if week_costs > 0:
+        lines.append(f"Costs:    *−{format_currency(currency, week_costs)}*")
+    if week_remit > 0:
+        lines.append(f"Remit:    *−{format_currency(currency, week_remit)}*")
     sign = "+" if week_profit >= 0 else ""
     lines.append(f"Profit:   *{sign}{format_currency(currency, week_profit)}*")
     if best["profit"] != worst["profit"]:
