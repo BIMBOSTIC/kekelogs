@@ -1,7 +1,7 @@
 import io
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from services import users as user_svc
@@ -324,10 +324,11 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             db_user["id"], effective_start, cleared,
         )
         expense_rows = await db.fetch(
-            """SELECT DATE(occurred_at) AS day, COALESCE(SUM(amount), 0) AS costs
+            """SELECT DATE(occurred_at) AS day, type, COALESCE(SUM(amount), 0) AS amount
                FROM expenses WHERE user_id = $1 AND DATE(occurred_at) >= $2
                  AND ($3::timestamptz IS NULL OR occurred_at >= $3)
-               GROUP BY DATE(occurred_at)""",
+               GROUP BY DATE(occurred_at), type
+               ORDER BY amount DESC""",
             db_user["id"], effective_start, cleared,
         )
         remit_rows = await db.fetch(
@@ -336,7 +337,13 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         ) if vehicle else []
 
     trips_by_day = {r["day"]: r for r in trip_rows}
-    costs_by_day = {r["day"]: r["costs"] for r in expense_rows}
+    costs_by_day: dict = {}
+    cost_detail_by_day: dict = {}
+    for r in expense_rows:
+        day = r["day"]
+        amt = float(r["amount"])
+        costs_by_day[day] = costs_by_day.get(day, 0.0) + amt
+        cost_detail_by_day.setdefault(day, []).append((r["type"], amt))
     remit_by_day = {r["day"]: r["status"] for r in remit_rows}
 
     days = []
@@ -366,6 +373,10 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     week_remit = sum(d["remit"] for d in days)
     week_profit = sum(d["profit"] for d in days)
 
+    _WEEK_ICONS = {
+        "FUEL": "⛽", "REPAIR": "🔧", "WASHING": "🚿", "FINE": "📋",
+        "INSURANCE": "🛡️", "TYRE": "🔄", "ACCESSORY": "🔩", "OTHER": "💸",
+    }
     header = "📅 *Since clear*\n" if cleared and cleared.date() > week_start else "📅 *Last 7 days*\n"
     lines = [header]
     for d in days:
@@ -377,6 +388,10 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         day_label = d["date"].strftime("%a") + " " + str(d["date"].day)
         owed_note = f" (+{format_currency(currency, d['owed'])} owed)" if d["owed"] > 0 else ""
         lines.append(f"`{day_label:<7}` {bar}  {sign}{format_currency(currency, profit)}{owed_note}{star}")
+        day_costs = cost_detail_by_day.get(d["date"], [])
+        if day_costs:
+            cost_str = "  ".join(f"{_WEEK_ICONS.get(t, '💸')}{format_currency(currency, a)}" for t, a in day_costs)
+            lines.append(f"  {cost_str}")
 
     lines.append("\n──────────────────")
     lines.append(f"Earnings: *{format_currency(currency, week_gross)}*")
@@ -753,6 +768,99 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     currency = db_user["currency"]
     cleared = db_user.get("log_cleared_at")
     vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
+
+    args = ctx.args or []
+    n_fills = 1
+    if args and len(args) == 1 and args[0].isdigit():
+        n_fills = max(1, min(10, int(args[0])))
+
+    if n_fills > 1:
+        async with get_db() as db:
+            fill_rows = await db.fetch(
+                """SELECT id, amount, litres, occurred_at
+                   FROM expenses
+                   WHERE user_id = $1 AND type = 'FUEL'
+                     AND ($2::timestamptz IS NULL OR occurred_at >= $2)
+                   ORDER BY occurred_at DESC
+                   LIMIT $3""",
+                db_user["id"], cleared, n_fills,
+            )
+            if not fill_rows:
+                await update.message.reply_text(
+                    "No fuel entries yet.\nLog fuel: `fuel 2000` or `fuel 2000 32l`",
+                    parse_mode="Markdown",
+                )
+                return
+
+            actual_n = len(fill_rows)
+            periods = []
+            for i, fill in enumerate(fill_rows):
+                period_start = fill["occurred_at"]
+                period_end = fill_rows[i - 1]["occurred_at"] if i > 0 else datetime.now(timezone.utc)
+
+                trip_stats = await db.fetchrow(
+                    """SELECT COALESCE(SUM(CASE WHEN paid=1 THEN amount ELSE 0 END),0) AS gross,
+                              COUNT(CASE WHEN paid=1 THEN 1 END) AS paid_cnt
+                       FROM trips WHERE user_id=$1
+                       AND occurred_at >= $2 AND occurred_at < $3""",
+                    db_user["id"], period_start, period_end,
+                )
+                remit_stats = None
+                if vehicle:
+                    remit_stats = await db.fetchrow(
+                        """SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS days_paid
+                           FROM remittance_log WHERE vehicle_id=$1 AND status='PAID'
+                           AND paid_on >= $2::date AND paid_on < $3::date""",
+                        vehicle["id"], period_start, period_end,
+                    )
+                periods.append({
+                    "fill": dict(fill),
+                    "gross": float(trip_stats["gross"]) if trip_stats else 0.0,
+                    "paid_cnt": int(trip_stats["paid_cnt"]) if trip_stats else 0,
+                    "remit_total": float(remit_stats["total"]) if remit_stats else 0.0,
+                    "remit_days": int(remit_stats["days_paid"]) if remit_stats else 0,
+                })
+
+        lines = [f"⛽ *Last {actual_n} fill{'s' if actual_n > 1 else ''}*\n"]
+        total_fuel = total_net = 0.0
+
+        for i, p in enumerate(periods):
+            fill = p["fill"]
+            fuel_cost = float(fill["amount"])
+            gross = p["gross"]
+            remit_total = p["remit_total"]
+            net = gross - fuel_cost - remit_total
+            total_fuel += fuel_cost
+            total_net += net
+
+            fill_date = fill["occurred_at"].date()
+            if i == 0:
+                days_ago = (date.today() - fill_date).days
+                period_str = "today" if days_ago == 0 else f"{fill_date.strftime('%d %b')} → now  ({days_ago}d)"
+            else:
+                end_date = periods[i - 1]["fill"]["occurred_at"].date() - timedelta(days=1)
+                period_len = (end_date - fill_date).days + 1
+                period_str = f"{fill_date.strftime('%d %b')} → {end_date.strftime('%d %b')}  ({period_len}d)"
+
+            fuel_str = format_currency(currency, fuel_cost)
+            if fill["litres"]:
+                fuel_str += f" · {fill['litres']:.0f}L"
+
+            fill_num = actual_n - i
+            lines.append(f"*Fill {fill_num}* — {period_str}")
+            lines.append(f"  Fuel:    −{fuel_str}")
+            lines.append(f"  Earned:  *{format_currency(currency, gross)}*  ({p['paid_cnt']} trips)")
+            if remit_total > 0:
+                lines.append(f"  Remit:   −*{format_currency(currency, remit_total)}*  ({p['remit_days']}d)")
+            sign = "+" if net >= 0 else ""
+            lines.append(f"  Net:     *{sign}{format_currency(currency, net)}*\n")
+
+        lines.append("──────────────────")
+        lines.append(f"Total fuel:  *−{format_currency(currency, total_fuel)}*")
+        sign = "+" if total_net >= 0 else ""
+        lines.append(f"Combined net: *{sign}{format_currency(currency, total_net)}*")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
 
     async with get_db() as db:
         last_fill = await db.fetchrow(

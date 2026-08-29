@@ -31,7 +31,6 @@ _EXACT_CMDS = {
     "rest": cmd_rest,
     "help": cmd_help,
     "privacy": cmd_privacy,
-    "fuel": cmd_fuel,
     "last fill": cmd_fuel,
     "since last fill": cmd_fuel,
     "edit": cmd_edit,
@@ -47,6 +46,7 @@ _PREFIX_CMDS = {
     "summary": cmd_summary,
     "costs": cmd_costs,
     "delete": cmd_delete,
+    "fuel": cmd_fuel,
 }
 
 
