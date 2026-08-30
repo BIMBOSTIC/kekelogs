@@ -1245,6 +1245,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`week` — weekly summary\n"
         f"`month` — monthly summary\n"
         f"`fuel` — fuel cost history & P&L since last fill\n"
+        f"`fills 2` — compare last N fill cycles (or `/fuel 2`)\n"
         f"`costs` — expense history (last 15)\n"
         f"`costs fuel week` — fuel expenses this week\n"
         f"`costs aug 15` — expenses on a specific date\n"
