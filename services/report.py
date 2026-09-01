@@ -176,45 +176,123 @@ async def build_report(
         ])
     _auto_width(ws_remit)
 
-    # ── Sheet 4: Summary ─────────────────────────────────────────────────────
+    # ── Sheet 4: Summary / Ledger ────────────────────────────────────────────
     ws_sum = wb.create_sheet("Summary")
-    gross = sum(float(r["amount"]) for r in trips if r["paid"])
-    unpaid_total = sum(float(r["amount"]) for r in trips if not r["paid"])
-    costs = sum(float(r["amount"]) for r in expenses)
+    ws_sum.column_dimensions["A"].width = 36
+    ws_sum.column_dimensions["B"].width = 20
+    ws_sum.column_dimensions["C"].width = 26
+
+    # Aggregate values
+    exp_by_type: dict[str, float] = {}
+    for r in expenses:
+        exp_by_type[r["type"]] = exp_by_type.get(r["type"], 0.0) + float(r["amount"])
+
+    paid_list = [r for r in trips if r["paid"]]
+    unpaid_list = [r for r in trips if not r["paid"]]
+    gross = sum(float(r["amount"]) for r in paid_list)
+    unpaid_total = sum(float(r["amount"]) for r in unpaid_list)
+    total_expenses = sum(exp_by_type.values())
     remit_paid = sum(float(r["amount"]) for r in remittance if r["status"] == "PAID")
-    net = gross - costs - remit_paid
+    remit_days = sum(1 for r in remittance if r["status"] == "PAID")
+    rest_days = sum(1 for r in remittance if r["status"] == "REST")
+    net = gross - total_expenses - remit_paid
 
-    rows = [
-        ("Period", f"{effective_start} → {end}"),
-        ("", ""),
-        (f"Gross earnings ({currency})", gross),
-        (f"Total expenses ({currency})", costs),
-        (f"Remittance paid ({currency})", remit_paid),
-        ("", ""),
-        (f"Net profit ({currency})", net),
-        ("", ""),
-        ("Trips (paid)", sum(1 for r in trips if r["paid"])),
-        ("Trips (unpaid)", sum(1 for r in trips if not r["paid"])),
-        (f"Unpaid amount ({currency})", unpaid_total),
-    ]
-    _header_row(ws_sum, ["Metric", "Value"])
-    for label_cell, val in rows:
-        ws_sum.append([label_cell, val])
+    paid_count = len(paid_list)
+    unpaid_count = len(unpaid_list)
+    working_days = len(set(r["occurred_at"].date() for r in paid_list)) if paid_list else 0
+    avg_per_day = gross / working_days if working_days else 0.0
+    avg_per_trip = gross / paid_count if paid_count else 0.0
+    margin = net / gross * 100 if gross > 0 else 0.0
 
-    bold = Font(bold=True)
-    for row in ws_sum.iter_rows(min_row=2):
-        if row[0].value:
-            row[0].font = bold
+    # Styles
+    _green_hdr  = PatternFill("solid", fgColor="375623")
+    _orange_hdr = PatternFill("solid", fgColor="833C00")
+    _grey_hdr   = PatternFill("solid", fgColor="595959")
+    _navy_hdr   = PatternFill("solid", fgColor="1F4E79")
+    _sub_fill   = PatternFill("solid", fgColor="D9E1F2")
+    _net_fill   = PatternFill("solid", fgColor="E2EFDA" if net >= 0 else "FFDDC1")
+    _wbold      = Font(bold=True, color="FFFFFF", size=11)
+    _bold       = Font(bold=True)
+    _bigbold    = Font(bold=True, size=12)
+    _note_font  = Font(italic=True, color="767676", size=9)
+    _cur_fmt    = f'"{currency}"#,##0.00'
+    _indent     = Alignment(indent=2)
 
-    # Highlight net profit row
-    for row in ws_sum.iter_rows(min_row=2):
-        if row[0].value and "Net profit" in str(row[0].value):
-            fill = PatternFill("solid", fgColor="E2EFDA" if net >= 0 else "FFDDC1")
-            for cell in row:
-                cell.fill = fill
-                cell.font = Font(bold=True)
+    _type_labels = {
+        "FUEL": "Fuel", "REPAIR": "Repair / Maintenance", "WASHING": "Washing",
+        "FINE": "Fine / Penalty", "INSURANCE": "Insurance",
+        "TYRE": "Tyre", "ACCESSORY": "Accessory", "OTHER": "Other",
+    }
 
-    _auto_width(ws_sum)
+    def _sec(title, fill):
+        ws_sum.append([title, "", ""])
+        r = ws_sum.max_row
+        ws_sum.merge_cells(f"A{r}:C{r}")
+        ws_sum.cell(r, 1).fill = fill
+        ws_sum.cell(r, 1).font = _wbold
+        ws_sum.cell(r, 1).alignment = Alignment(horizontal="left", indent=1)
+
+    def _row(label, value="", note="", bold=False, big=False, cur=True, rfill=None):
+        ws_sum.append([label, value if value != "" else None, note or None])
+        r = ws_sum.max_row
+        ws_sum.cell(r, 1).alignment = _indent
+        ws_sum.cell(r, 3).font = _note_font
+        if cur and isinstance(value, (int, float)):
+            ws_sum.cell(r, 2).number_format = _cur_fmt
+        fnt = _bigbold if big else (_bold if bold else None)
+        if fnt:
+            ws_sum.cell(r, 1).font = fnt
+            ws_sum.cell(r, 2).font = fnt
+        if rfill:
+            for c in range(1, 4):
+                ws_sum.cell(r, c).fill = rfill
+
+    # Title block
+    ws_sum.append([f"Driver Ledger  —  {display_label}", "", ""])
+    ws_sum.merge_cells("A1:C1")
+    ws_sum.cell(1, 1).font = Font(bold=True, size=15)
+    ws_sum.cell(1, 1).alignment = Alignment(horizontal="left")
+    ws_sum.append([f"Period:  {effective_start}  →  {end}", "", ""])
+    ws_sum.cell(2, 1).font = Font(italic=True, color="595959")
+    ws_sum.append([""])
+
+    # INCOME
+    _sec("INCOME", _green_hdr)
+    _row("Gross Earnings  (paid trips)", gross, f"{paid_count} trips")
+    if unpaid_total > 0:
+        _row("Owed / Unpaid", unpaid_total, f"{unpaid_count} trips · not yet collected")
+    ws_sum.append([""])
+    _row("Working Days", working_days, "", cur=False)
+    _row("Average Earnings / Day", avg_per_day, "paid trips only")
+    _row("Average Earnings / Trip", avg_per_trip, "paid trips only")
+    ws_sum.append([""])
+
+    # EXPENSES
+    _sec("EXPENSES", _orange_hdr)
+    for etype, amount in sorted(exp_by_type.items(), key=lambda x: -x[1]):
+        _row(_type_labels.get(etype, etype.title()), amount)
+    if not exp_by_type:
+        _row("No expenses recorded this period", "", "")
+    _row("Total Expenses", total_expenses, "", bold=True, rfill=_sub_fill)
+    ws_sum.append([""])
+
+    # REMITTANCE
+    _sec("REMITTANCE", _grey_hdr)
+    _row("Days Paid", remit_days, "", cur=False)
+    if rest_days:
+        _row("Rest Days  (no charge)", rest_days, "", cur=False)
+    _row("Total Remittance Paid", remit_paid, "", bold=True, rfill=_sub_fill)
+    ws_sum.append([""])
+
+    # PROFIT SUMMARY
+    _sec("PROFIT SUMMARY", _navy_hdr)
+    _row("Gross Earnings", gross)
+    _row("Less:  Total Expenses", total_expenses)
+    _row("Less:  Remittance Paid", remit_paid)
+    ws_sum.append([""])
+    _row("Net Profit", net, "", bold=True, big=True, rfill=_net_fill)
+    if gross > 0:
+        _row("Profit Margin", f"{margin:.1f}%", "net ÷ gross earnings", bold=True, cur=False)
 
     buf = io.BytesIO()
     wb.save(buf)
