@@ -294,6 +294,9 @@ async def build_report(
     if gross > 0:
         _row("Profit Margin", f"{margin:.1f}%", "net ÷ gross earnings", bold=True, cur=False)
 
+    # Open to Summary tab by default
+    wb.active = ws_sum
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
