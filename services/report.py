@@ -28,6 +28,47 @@ _MONTHS = {
 }
 
 
+def _parse_date_part(text: str, fallback_month: int | None, fallback_year: int) -> date | None:
+    """Parse a date fragment like 'aug 17', '17', 'aug 17 2025' → date."""
+    parts = text.strip().split()
+    if not parts:
+        return None
+
+    # Pure day number: "17" → use fallback_month
+    if len(parts) == 1 and parts[0].isdigit():
+        if fallback_month is None:
+            return None
+        try:
+            return date(fallback_year, fallback_month, int(parts[0]))
+        except ValueError:
+            return None
+
+    # "aug 17" or "august 17" or "aug 17 2025"
+    month_num = _MONTHS.get(parts[0])
+    if month_num and len(parts) >= 2 and parts[1].isdigit():
+        year = fallback_year
+        if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) == 4:
+            year = int(parts[2])
+        try:
+            return date(year, month_num, int(parts[1]))
+        except ValueError:
+            return None
+
+    # "17 aug" or "17 august"
+    if parts[0].isdigit() and len(parts) >= 2:
+        month_num = _MONTHS.get(parts[1])
+        if month_num:
+            year = fallback_year
+            if len(parts) == 3 and parts[2].isdigit() and len(parts[2]) == 4:
+                year = int(parts[2])
+            try:
+                return date(year, month_num, int(parts[0]))
+            except ValueError:
+                return None
+
+    return None
+
+
 def parse_report_period(text: str) -> tuple[date, date, str, str] | None:
     """Parse flexible period text → (start, end, display_label, filename_label) or None."""
     today = date.today()
@@ -54,6 +95,29 @@ def parse_report_period(text: str) -> tuple[date, date, str, str] | None:
         end = first_this - timedelta(days=1)
         start = date(end.year, end.month, 1)
         return start, end, end.strftime("%B %Y"), end.strftime("%Y-%m")
+
+    # Custom range: "aug 17 to 31" / "from aug 17 to sep 5" / "aug 17 to aug 31"
+    if " to " in t:
+        raw = t.removeprefix("from").strip()
+        halves = raw.split(" to ", 1)
+        start_str, end_str = halves[0].strip(), halves[1].strip()
+        start_date = _parse_date_part(start_str, None, today.year)
+        if start_date:
+            if start_date > today:
+                start_date = date(start_date.year - 1, start_date.month, start_date.day)
+            end_date = _parse_date_part(end_str, start_date.month, start_date.year)
+            if end_date:
+                if end_date < start_date:
+                    # end day rolled over a month boundary (e.g. "aug 28 to 5" → sep 5)
+                    try:
+                        end_date = date(start_date.year, start_date.month + 1, end_date.day)
+                    except ValueError:
+                        end_date = date(start_date.year + 1, 1, end_date.day)
+                end_date = min(end_date, today)
+                if end_date >= start_date:
+                    display = f"{start_date.strftime('%d %b')} → {end_date.strftime('%d %b %Y')}"
+                    fname = f"{start_date.strftime('%Y-%m-%d')}_to_{end_date.strftime('%Y-%m-%d')}"
+                    return start_date, end_date, display, fname
 
     # Named month: "august", "aug", "aug 2025", "august 2025"
     parts = t.split()

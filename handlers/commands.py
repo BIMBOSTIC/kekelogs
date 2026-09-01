@@ -1089,7 +1089,8 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "Couldn't understand that period. Try:\n"
             "`report today` · `report week` · `report last week`\n"
             "`report month` · `report last month`\n"
-            "`report august` · `report aug 2025`",
+            "`report august` · `report aug 2025`\n"
+            "`report aug 17 to 31` · `report from aug 17 to sep 5`",
             parse_mode="Markdown",
         )
         return
