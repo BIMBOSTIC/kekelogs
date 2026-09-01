@@ -8,7 +8,7 @@ from services import vehicles as vehicle_svc
 from services.trips import (
     save_trip, update_trip, update_expense, update_remittance_entry, delete_entry,
 )
-from services.report import build_report, _PERIOD_LABELS
+from services.report import build_report, parse_report_period
 from db.database import get_db
 from utils.formatting import format_currency, snapshot_to_hint, format_log_label
 
@@ -265,7 +265,7 @@ async def handle_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_report_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
-    period = q.data.split(":", 1)[1]
+    period_key = q.data.split(":", 1)[1].replace("_", " ")
     uid = update.effective_user.id
     db_user = await user_svc.get_user(uid)
     if not db_user:
@@ -277,22 +277,23 @@ async def handle_report_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         await q.edit_message_text("No vehicle found. Run /start to set up.")
         return
 
-    if period not in _PERIOD_LABELS:
+    parsed = parse_report_period(period_key)
+    if not parsed:
         await q.edit_message_text("Invalid period selection.")
         return
 
-    label = _PERIOD_LABELS.get(period)
-    await q.edit_message_text(f"⏳ Building {label} report…")
+    start, end, display_label, filename_label = parsed
+    await q.edit_message_text(f"⏳ Building {display_label} report…")
 
     excel_bytes, filename = await build_report(
-        db_user["id"], vehicle["id"], period, db_user["currency"],
-        cleared_at=db_user.get("log_cleared_at"),
+        db_user["id"], vehicle["id"], start, end, display_label, filename_label,
+        db_user["currency"], cleared_at=db_user.get("log_cleared_at"),
     )
     doc = io.BytesIO(excel_bytes)
     doc.name = filename
     await q.message.reply_document(
         doc,
-        caption=f"📊 *{label} report*",
+        caption=f"📊 *{display_label} report*",
         parse_mode="Markdown",
         filename=filename,
     )

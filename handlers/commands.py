@@ -8,7 +8,7 @@ from services import users as user_svc
 from services import vehicles as vehicle_svc
 from services.trips import undo_last_action, redo_last_action, save_trip
 from services.remittance import mark_rest_day
-from services.report import build_report, _PERIOD_LABELS
+from services.report import build_report, parse_report_period
 from db.database import get_db
 from utils.formatting import format_currency, format_log_label
 
@@ -1063,48 +1063,58 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     args = ctx.args or []
-    period = args[0].lower() if args else None
+    period_text = " ".join(args).strip() if args else None
 
-    if not period:
+    if not period_text:
         await update.message.reply_text(
             "📊 *Export report*\n\nChoose a period:",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("Today", callback_data="report:today"),
                     InlineKeyboardButton("This week", callback_data="report:week"),
+                    InlineKeyboardButton("Last week", callback_data="report:last_week"),
+                ],
+                [
                     InlineKeyboardButton("This month", callback_data="report:month"),
+                    InlineKeyboardButton("Last month", callback_data="report:last_month"),
                 ],
             ]),
             parse_mode="Markdown",
         )
         return
 
-    await _send_report(update.message, db_user, period)
-
-
-async def _send_report(message, db_user: dict, period: str) -> None:
-    if period not in _PERIOD_LABELS:
-        await message.reply_text("Invalid period. Choose: today, week, or month.")
+    parsed = parse_report_period(period_text)
+    if not parsed:
+        await update.message.reply_text(
+            "Couldn't understand that period. Try:\n"
+            "`report today` · `report week` · `report last week`\n"
+            "`report month` · `report last month`\n"
+            "`report august` · `report aug 2025`",
+            parse_mode="Markdown",
+        )
         return
 
+    await _send_report(update.message, db_user, *parsed)
+
+
+async def _send_report(message, db_user: dict, start, end, display_label: str, filename_label: str) -> None:
     vehicle = await vehicle_svc.get_active_vehicle(db_user["id"])
     if not vehicle:
         await message.reply_text("No vehicle found. Run /start to set up.")
         return
 
-    label = _PERIOD_LABELS[period]
-    wait_msg = await message.reply_text(f"⏳ Building {label} report…")
+    wait_msg = await message.reply_text(f"⏳ Building {display_label} report…")
 
     excel_bytes, filename = await build_report(
-        db_user["id"], vehicle["id"], period, db_user["currency"],
-        cleared_at=db_user.get("log_cleared_at"),
+        db_user["id"], vehicle["id"], start, end, display_label, filename_label,
+        db_user["currency"], cleared_at=db_user.get("log_cleared_at"),
     )
 
     doc = io.BytesIO(excel_bytes)
     doc.name = filename
     await message.reply_document(
         doc,
-        caption=f"📊 *{label} report*",
+        caption=f"📊 *{display_label} report*",
         parse_mode="Markdown",
         filename=filename,
     )
@@ -1253,7 +1263,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"`clients` — top clients\n"
         f"`setremit 1200` — update daily remittance rate\n"
         f"`car` — vehicle & remittance settings\n"
-        f"`report` — export Excel report (week / month / today)\n"
+        f"`report` — export Excel report\n"
+        f"`report august` · `report last month` · `report last week`\n"
         f"`privacy` — privacy info\n"
         f"`/deleteme` — delete your account\n",
         parse_mode="Markdown",

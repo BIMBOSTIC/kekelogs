@@ -1,3 +1,4 @@
+import calendar
 import io
 from datetime import date, timedelta
 
@@ -13,19 +14,63 @@ _PERIOD_LABELS = {
     "weekly": "Last 7 days",
     "month": "This month",
     "monthly": "This month",
+    "last_week": "Last week",
+    "last_month": "Last month",
+}
+
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2,
+    "mar": 3, "march": 3, "apr": 4, "april": 4,
+    "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
 }
 
 
-def _date_range(period: str) -> tuple[date, date, str]:
+def parse_report_period(text: str) -> tuple[date, date, str, str] | None:
+    """Parse flexible period text → (start, end, display_label, filename_label) or None."""
     today = date.today()
-    if period in ("today", "daily"):
-        return today, today, today.strftime("%Y-%m-%d")
-    if period in ("week", "weekly"):
+    t = text.strip().lower()
+
+    if t in ("today", "daily"):
+        return today, today, "Today", today.strftime("%Y-%m-%d")
+
+    if t in ("week", "weekly", "this week"):
         start = today - timedelta(days=6)
-        return start, today, f"{start.strftime('%Y-%m-%d')}_to_{today.strftime('%Y-%m-%d')}"
-    # month / monthly (default)
-    start = date(today.year, today.month, 1)
-    return start, today, today.strftime("%Y-%m")
+        return start, today, "Last 7 days", f"{start.strftime('%Y-%m-%d')}_to_{today.strftime('%Y-%m-%d')}"
+
+    if t in ("last week", "last_week"):
+        end = today - timedelta(days=7)
+        start = end - timedelta(days=6)
+        return start, end, "Last week", f"{start.strftime('%Y-%m-%d')}_to_{end.strftime('%Y-%m-%d')}"
+
+    if t in ("month", "monthly", "this month"):
+        start = date(today.year, today.month, 1)
+        return start, today, today.strftime("%B %Y"), today.strftime("%Y-%m")
+
+    if t in ("last month", "last_month"):
+        first_this = date(today.year, today.month, 1)
+        end = first_this - timedelta(days=1)
+        start = date(end.year, end.month, 1)
+        return start, end, end.strftime("%B %Y"), end.strftime("%Y-%m")
+
+    # Named month: "august", "aug", "aug 2025", "august 2025"
+    parts = t.split()
+    month_num = _MONTHS.get(parts[0])
+    if month_num:
+        year = today.year
+        if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
+            year = int(parts[1])
+        start = date(year, month_num, 1)
+        if start > today:
+            year -= 1
+            start = date(year, month_num, 1)
+        end_day = calendar.monthrange(year, month_num)[1]
+        end = min(date(year, month_num, end_day), today)
+        return start, end, start.strftime("%B %Y"), start.strftime("%Y-%m")
+
+    return None
 
 
 def _header_row(ws, headers: list[str]) -> None:
@@ -46,11 +91,10 @@ def _auto_width(ws) -> None:
 
 
 async def build_report(
-    user_id: int, vehicle_id: int, period: str, currency: str,
-    cleared_at=None,
+    user_id: int, vehicle_id: int,
+    start: date, end: date, display_label: str, filename_label: str,
+    currency: str, cleared_at=None,
 ) -> tuple[bytes, str]:
-    start, end, label = _date_range(period)
-
     effective_start = start
     if cleared_at:
         clear_date = cleared_at.date() if hasattr(cleared_at, "date") else cleared_at
@@ -141,7 +185,7 @@ async def build_report(
     net = gross - costs - remit_paid
 
     rows = [
-        ("Period", f"{start} → {end}"),
+        ("Period", f"{effective_start} → {end}"),
         ("", ""),
         (f"Gross earnings ({currency})", gross),
         (f"Total expenses ({currency})", costs),
@@ -175,4 +219,4 @@ async def build_report(
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    return buf.getvalue(), f"driver_ledger_{label}.xlsx"
+    return buf.getvalue(), f"driver_ledger_{filename_label}.xlsx"
