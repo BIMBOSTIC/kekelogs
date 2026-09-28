@@ -874,18 +874,17 @@ async def cmd_fuel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if last_fill:
             fill_ts = last_fill["occurred_at"]
             fill_date = fill_ts.date()
-            fill_day_start = datetime(fill_date.year, fill_date.month, fill_date.day, tzinfo=timezone.utc)
             since_paid = await db.fetchrow(
                 """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
                    FROM trips WHERE user_id = $1 AND paid = 1
                      AND occurred_at >= $2""",
-                db_user["id"], fill_day_start,
+                db_user["id"], fill_ts,
             )
             since_owed = await db.fetchrow(
                 """SELECT COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS cnt
                    FROM trips WHERE user_id = $1 AND paid = 0
                      AND occurred_at >= $2""",
-                db_user["id"], fill_day_start,
+                db_user["id"], fill_ts,
             )
             if vehicle:
                 since_remit = await db.fetchrow(
