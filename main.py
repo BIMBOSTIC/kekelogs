@@ -1,4 +1,5 @@
 import logging
+import traceback
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -27,6 +28,18 @@ logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
 )
 logger = logging.getLogger(__name__)
+
+
+async def _error_handler(update: object, context) -> None:
+    logger.error("Unhandled exception for update %s:\n%s", update,
+                 "".join(traceback.format_exception(type(context.error), context.error, context.error.__traceback__)))
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "Something went wrong on my end — please try again."
+            )
+        except Exception:
+            pass
 
 
 async def _post_init(app: Application) -> None:
@@ -79,6 +92,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_delete_entry_cancel, pattern="^del_no$"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    app.add_error_handler(_error_handler)
 
     logger.info("Starting Driver Ledger bot (polling)...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

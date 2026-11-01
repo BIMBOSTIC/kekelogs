@@ -278,4 +278,5 @@ def build_start_handler() -> ConversationHandler:
         },
         fallbacks=[CommandHandler("cancel", _cancel)],
         allow_reentry=True,
+        per_message=False,
     )

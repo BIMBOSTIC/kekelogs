@@ -10,7 +10,7 @@ _pool: asyncpg.Pool | None = None
 async def init_db() -> None:
     global _pool
     ssl = "require" if DATABASE_SSL else False
-    _pool = await asyncpg.create_pool(DATABASE_URL, ssl=ssl)
+    _pool = await asyncpg.create_pool(DATABASE_URL, ssl=ssl, statement_cache_size=0)
     async with _pool.acquire() as conn:
         await conn.execute(_SCHEMA.read_text(encoding="utf-8"))
         # Column migrations for existing databases
